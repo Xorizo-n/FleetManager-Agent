@@ -1,6 +1,6 @@
 # FleetManager Agent
 
-Windows-агент для Fleet Manager. Вариант 1 состоит из службы Windows, tray-приложения и отдельной панели управления, которая запускается только через UAC.
+Windows-агент для [Fleet Manager](https://github.com/Xorizo-n/FleetManager-Server). Вариант 1 состоит из службы Windows, tray-приложения и отдельной панели управления, которая запускается только через UAC.
 
 ## Каталоги
 
@@ -22,3 +22,19 @@ dotnet publish src/FleetManager.Agent.Control/FleetManager.Agent.Control.csproj 
 После публикации запустите `installer\install.ps1 -ServerUrl https://fleet.example` из PowerShell от имени администратора. Конфигурация и логи находятся в `%ProgramData%\FleetManagerAgent`.
 
 Сервис отправляет POST на `/api/agent/heartbeat`; этот endpoint нужно добавить на сервере Fleet Manager отдельным изменением backend.
+
+## Установщик (Inno Setup)
+
+`build-installer.ps1` собирает все три проекта и упаковывает их в единый EXE-установщик:
+
+```powershell
+.\build-installer.ps1
+.\build-installer.ps1 -AppVersion 1.2
+.\build-installer.ps1 -SkipPublish   # пересобрать инсталлятор без dotnet publish
+```
+
+Требует .NET SDK 8+ и Inno Setup 6 (с ISPP). Результат — `dist\FleetManagerAgent-Setup.exe`:
+
+```powershell
+FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=your-token
+```

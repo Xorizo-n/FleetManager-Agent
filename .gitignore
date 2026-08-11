@@ -1,3 +1,16 @@
 **/bin/
 **/obj/
 publish/
+dist/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+
+# dotnet test output
+TestResults/
+
+# OS
+Thumbs.db
