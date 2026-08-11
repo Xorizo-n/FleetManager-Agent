@@ -1,8 +1,13 @@
 # FleetManager Agent
 
-Windows-агент для [Fleet Manager](https://github.com/Xorizo-n/FleetManager-Server). Вариант 1 состоит из службы Windows, tray-приложения и отдельной панели управления, которая запускается только через UAC.
+Windows-агент для Fleet Manager. Вариант 1 состоит из службы Windows, tray-приложения и отдельной панели управления, которая запускается только через UAC.
 
-## Каталоги
+## Связанные репозитории
+
+- [FleetManager-Server](https://github.com/Xorizo-n/FleetManager-Server) — backend/frontend, принимает регистрацию, heartbeat и инвентаризацию от агента (`routers/agent.py`).
+- [RTF_OOD_AnsiblePlaybooks](https://github.com/kozlov174/RTF_OOD_AnsiblePlaybooks) — плейбуки, которые сервер запускает на хостах с установленным агентом.
+
+## Структура
 
 - `src/FleetManager.Agent.Core` — конфигурация, machine-id, состояние, журнал, Named Pipe, API-клиент и сбор инвентаризации.
 - `src/FleetManager.Agent.Service` — фоновая служба: периодический сбор железа/ПО, heartbeat и обработка локальных команд.
@@ -13,7 +18,6 @@ Windows-агент для [Fleet Manager](https://github.com/Xorizo-n/FleetManag
 ## Сборка
 
 ```powershell
-dotnet test tests/FleetManager.Agent.Core.Tests/FleetManager.Agent.Core.Tests.csproj
 dotnet publish src/FleetManager.Agent.Service/FleetManager.Agent.Service.csproj -c Release -r win-x64 --self-contained true -o publish/win-x64
 dotnet publish src/FleetManager.Agent.Tray/FleetManager.Agent.Tray.csproj -c Release -r win-x64 --self-contained true -o publish/win-x64
 dotnet publish src/FleetManager.Agent.Control/FleetManager.Agent.Control.csproj -c Release -r win-x64 --self-contained true -o publish/win-x64
@@ -21,7 +25,7 @@ dotnet publish src/FleetManager.Agent.Control/FleetManager.Agent.Control.csproj 
 
 После публикации запустите `installer\install.ps1 -ServerUrl https://fleet.example` из PowerShell от имени администратора. Конфигурация и логи находятся в `%ProgramData%\FleetManagerAgent`.
 
-Сервис отправляет POST на `/api/agent/heartbeat`; этот endpoint нужно добавить на сервере Fleet Manager отдельным изменением backend.
+Сервис регистрируется через enrollment-токен и шлёт heartbeat (железо + ПО) на `/api/agent/heartbeat` сервера Fleet Manager.
 
 ## Установщик (Inno Setup)
 
@@ -37,4 +41,10 @@ dotnet publish src/FleetManager.Agent.Control/FleetManager.Agent.Control.csproj 
 
 ```powershell
 FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=your-token
+```
+
+## Тесты
+
+```powershell
+dotnet test tests/FleetManager.Agent.Core.Tests/FleetManager.Agent.Core.Tests.csproj
 ```
