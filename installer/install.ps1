@@ -36,6 +36,9 @@ if ($ssh.State -ne 'Installed') {
 }
 Set-Service -Name sshd -StartupType Automatic
 Start-Service sshd
+# Ansible connects with ansible_shell_type=powershell and runs raw PowerShell scripts;
+# without this, sshd defaults new sessions to cmd.exe and every raw-based playbook task fails.
+New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force | Out-Null
 if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) {
     New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
 }
