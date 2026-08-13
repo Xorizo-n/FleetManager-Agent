@@ -6,11 +6,19 @@
 ; Silent install:
 ;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=abc123
 ;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://... /EnrollmentToken=... /SshLogin=DOMAIN\user /DIR="C:\Custom\Path"
+;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://... /EnrollmentToken=... /AllowPort22=1
+;
+; By default only port 5022 (the Ansible management port) is opened; sshd is
+; configured to listen solely on 5022 and any pre-existing inbound firewall
+; rule that allows port 22 is detected and removed. Pass /AllowPort22=1 to
+; skip that check and leave whatever port-22 firewall state already exists.
 ;
 ; Silent uninstall (includes remote server cleanup):
 ;   "%ProgramFiles%\FleetManager Agent\unins000.exe" /VERYSILENT
 ;
 ; Build: run build-installer.ps1 (requires .NET SDK 8+ and Inno Setup 6 with ISPP).
+; This is the single source of truth for install steps — there is no separate
+; install.ps1; the PowerShell below is generated and run in CurStepChanged.
 
 #ifndef AppVersion
   #define AppVersion "1.0"
@@ -91,16 +99,22 @@ var
   GServerUrl:       string;
   GEnrollmentToken: string;
   GSshLogin:        string;
+  GAllowPort22:     Boolean;
 
 function InitializeSetup(): Boolean;
 var
-  InstallRootParam: string;
+  InstallRootParam, AllowPort22Param: string;
 begin
   GServerUrl        := Trim(ExpandConstant('{param:ServerUrl|}'));
   GEnrollmentToken  := Trim(ExpandConstant('{param:EnrollmentToken|}'));
   GSshLogin         := Trim(ExpandConstant('{param:SshLogin|}'));
 
-  // /InstallRoot=... accepted as an alias for /DIR=... (parity with install.ps1)
+  // /AllowPort22=1 skips the default port-22 firewall check/close step.
+  AllowPort22Param := Trim(ExpandConstant('{param:AllowPort22|}'));
+  GAllowPort22 := (AllowPort22Param <> '') and (CompareText(AllowPort22Param, '0') <> 0)
+    and (CompareText(AllowPort22Param, 'false') <> 0);
+
+  // /InstallRoot=... accepted as an alias for /DIR=...
   InstallRootParam := Trim(ExpandConstant('{param:InstallRoot|}'));
   if InstallRootParam <> '' then
     WizardForm.DirEdit.Text := InstallRootParam;
@@ -135,7 +149,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   InstallRoot, DataRoot, ServiceExe, TrayExe: string;
-  Config, Script: string;
+  Config, Script, AllowPort22Literal: string;
   UserDomain, UserName, ComputerName: string;
 begin
   if CurStep <> ssPostInstall then Exit;
@@ -145,7 +159,7 @@ begin
   ServiceExe  := InstallRoot + '\FleetManager.Agent.Service.exe';
   TrayExe     := InstallRoot + '\FleetManager.Agent.Tray.exe';
 
-  // Determine default SSH login (mirrors install.ps1 logic)
+  // Determine default SSH login: current interactive domain\user, or local user.
   if GSshLogin = '' then
   begin
     UserDomain   := GetEnv('USERDOMAIN');
@@ -156,6 +170,8 @@ begin
     else
       GSshLogin := UserName;
   end;
+
+  if GAllowPort22 then AllowPort22Literal := 'true' else AllowPort22Literal := 'false';
 
   // Write agent.json (must happen before the PowerShell script so logs dir exists)
   ForceDirectories(DataRoot + '\logs');
@@ -181,6 +197,7 @@ begin
     '$serviceExe  = ''' + ServiceExe + '''' + NL +
     '$trayExe     = ''' + TrayExe + '''' + NL +
     '$installRoot = ''' + InstallRoot + '''' + NL +
+    '$allowPort22 = $' + AllowPort22Literal + NL +
     'Log ''=== FleetManager Agent install script started ==''' + NL +
     '' + NL +
     '# OpenSSH Server — non-fatal: agent works even if this step is skipped' + NL +
@@ -190,25 +207,35 @@ begin
     '        Log ''Installing OpenSSH Server...''' + NL +
     '        Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null' + NL +
     '    }' + NL +
-    '    # Configure sshd to also listen on port 5022 (used by Ansible)' + NL +
+    '    # sshd listens ONLY on the Ansible management port 5022 by default' + NL +
     '    $sshdConfig = ''C:\ProgramData\ssh\sshd_config''' + NL +
     '    if (Test-Path $sshdConfig) {' + NL +
-    '        $cfg = Get-Content $sshdConfig -Raw' + NL +
-    '        if ($cfg -notmatch ''Port 5022'') { Add-Content $sshdConfig "`nPort 5022" }' + NL +
+    '        $lines = @(Get-Content $sshdConfig) | Where-Object { $_ -notmatch ''^\s*Port\s+\d+\s*$'' }' + NL +
+    '        Set-Content $sshdConfig -Value (@(''Port 5022'') + $lines)' + NL +
     '    } else {' + NL +
-    '        Set-Content $sshdConfig ''Port 22'' + "`n" + ''Port 5022''' + NL +
+    '        Set-Content $sshdConfig ''Port 5022''' + NL +
     '    }' + NL +
     '    Set-Service -Name sshd -StartupType Automatic' + NL +
     '    Restart-Service sshd -Force -ErrorAction SilentlyContinue' + NL +
-    '    # Firewall: standard SSH port 22' + NL +
-    '    if (-not (Get-NetFirewallRule -Name OpenSSH-Server-In-TCP -ErrorAction SilentlyContinue)) {' + NL +
-    '        New-NetFirewallRule -Name OpenSSH-Server-In-TCP -DisplayName ''OpenSSH Server (sshd)'' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null' + NL +
-    '    }' + NL +
-    '    # Firewall: Ansible SSH port 5022' + NL +
+    '    # Firewall: Ansible SSH port 5022 — the only SSH port opened by default' + NL +
     '    if (-not (Get-NetFirewallRule -Name FleetManager-Agent-SSH-5022 -ErrorAction SilentlyContinue)) {' + NL +
     '        New-NetFirewallRule -Name FleetManager-Agent-SSH-5022 -DisplayName ''FleetManager Agent SSH (5022)'' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 5022 | Out-Null' + NL +
     '    }' + NL +
-    '    Log ''OpenSSH OK (ports 22 + 5022)''' + NL +
+    '    # Port 22: closed by default (removes any pre-existing allow rule, incl.' + NL +
+    '    # the OpenSSH capability''s own default rule). Skippable with /AllowPort22=1.' + NL +
+    '    if ($allowPort22) {' + NL +
+    '        Log ''Port 22 check skipped (/AllowPort22)''' + NL +
+    '    } else {' + NL +
+    '        $port22Rules = @(Get-NetFirewallRule -Direction Inbound -Action Allow -ErrorAction SilentlyContinue |' + NL +
+    '            Where-Object { $_.Enabled -eq ''True'' -and (($_ | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue).LocalPort -contains ''22'') })' + NL +
+    '        if ($port22Rules) {' + NL +
+    '            $port22Rules | Remove-NetFirewallRule -ErrorAction SilentlyContinue' + NL +
+    '            Log "Port 22 closed ($($port22Rules.Count) firewall rule(s) removed)"' + NL +
+    '        } else {' + NL +
+    '            Log ''Port 22 already closed''' + NL +
+    '        }' + NL +
+    '    }' + NL +
+    '    Log ''OpenSSH OK (port 5022)''' + NL +
     '} catch {' + NL +
     '    Log "OpenSSH warning (non-fatal): $_"' + NL +
     '}' + NL +

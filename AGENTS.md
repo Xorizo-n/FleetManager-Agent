@@ -10,7 +10,7 @@ Windows-агент Fleet Manager: служба, отправляющая heartbe
 - `src/FleetManager.Agent.Service` — фоновая служба Windows: периодический сбор железа/ПО, heartbeat, обработка локальных команд.
 - `src/FleetManager.Agent.Tray` — неэлевированный процесс в трее; открывает Control через `runas`.
 - `src/FleetManager.Agent.Control` — WinForms-панель с manifest `requireAdministrator`.
-- `installer/` — `install.ps1`/`uninstall.ps1` (OpenSSH Server, firewall, служба, автозапуск tray), `FleetManagerAgent.iss` (Inno Setup script).
+- `installer/` — `FleetManagerAgent.iss` (Inno Setup script; единственный источник логики установки — весь install-код генерируется и исполняется прямо в `CurStepChanged`: OpenSSH Server, firewall/порт 5022, служба, автозапуск tray) и `uninstall.ps1` (отдельный скрипт для ручного/удалённого удаления вне пакета). Отдельного `install.ps1` больше нет — не создавайте его заново, любые изменения install-логики вносите в `.iss`.
 - `tests/FleetManager.Agent.Core.Tests` — dotnet-тесты Core; `installer/` также покрыт Pester-тестами (`tests/install_script.tests.ps1`).
 - `build-installer.ps1` — локальный пайплайн: dotnet publish (Service/Tray/Control) → Inno Setup → `dist/FleetManagerAgent-Setup.exe`. Требует Windows, .NET SDK 8+, Inno Setup 6 (с ISPP).
 
@@ -32,6 +32,7 @@ Windows-агент Fleet Manager: служба, отправляющая heartbe
 
 ```powershell
 dotnet test tests/FleetManager.Agent.Core.Tests/FleetManager.Agent.Core.Tests.csproj
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/install_script.tests.ps1
 ```
 
 ## Запреты
