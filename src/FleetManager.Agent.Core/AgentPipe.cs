@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
@@ -71,7 +72,7 @@ public sealed class AgentPipeServer
     {
         while (!_stoppingToken.IsCancellationRequested)
         {
-            await using var pipe = new NamedPipeServerStream(AgentConfiguration.PipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous);
+            await using var pipe = NamedPipeServerStreamAcl.Create(AgentConfiguration.PipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous, 0, 0, CreatePipeSecurity());
             try
             {
                 await pipe.WaitForConnectionAsync(_stoppingToken);
@@ -82,6 +83,18 @@ public sealed class AgentPipeServer
         }
     }
 
+    // The service runs as LocalSystem; the default pipe DACL only grants access to the
+    // creator, so an unelevated tray process can't connect and always sees "недоступна".
+    // Grant authenticated users read/write explicitly (command-level authorization for
+    // privileged actions like set-server-url still happens in ExecuteAsync via IsAdministrator).
+    private static PipeSecurity CreatePipeSecurity()
+    {
+        var security = new PipeSecurity();
+        security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
+        security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
+        return security;
+    }
 
     private async Task HandleAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
     {
