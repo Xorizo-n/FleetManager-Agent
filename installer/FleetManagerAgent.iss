@@ -265,6 +265,30 @@ var
   Config, Script, AllowPort22Literal: string;
   UserDomain, UserName, ComputerName: string;
 begin
+  if CurStep = ssInstall then
+  begin
+    // Stop the service BEFORE Setup copies [Files]: CloseApplicationsFilter only
+    // covers Tray/Control, so on an in-place upgrade the running service keeps
+    // FleetManager.Agent.Service.exe locked and Setup fails ("fatal error during
+    // installation", exit code 5) before ever reaching ssPostInstall below, which
+    // is where the service used to get stopped — too late for the copy that just
+    // failed. This is what a remote update (FleetManager-Server,
+    // services/agent_update.py) always hits, since the very definition of an
+    // in-place update is that the old service is still running when it starts.
+    ForceDirectories(DataRootDir + '\logs');
+    RunPowerShellScript(
+      '$logFile = ''' + DataRootDir + '\logs\install.log''' + NL +
+      'function Log { param($m) "$(Get-Date -f ''yyyy-MM-dd HH:mm:ss'')  $m" | Tee-Object -FilePath $logFile -Append | Write-Host }' + NL +
+      'if (Get-Service FleetManagerAgent -ErrorAction SilentlyContinue) {' + NL +
+      '    Log ''Stopping running service before file copy (in-place upgrade)...''' + NL +
+      '    Stop-Service FleetManagerAgent -Force -ErrorAction SilentlyContinue' + NL +
+      '    $deadline = (Get-Date).AddSeconds(15)' + NL +
+      '    while ((Get-Process -Name ''FleetManager.Agent.Service'' -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }' + NL +
+      '    Log ''Service stopped, proceeding with file copy''' + NL +
+      '}' + NL);
+    Exit;
+  end;
+
   if CurStep <> ssPostInstall then Exit;
 
   InstallRoot := ExpandConstant('{app}');
