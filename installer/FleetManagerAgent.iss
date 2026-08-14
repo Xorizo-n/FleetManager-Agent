@@ -6,11 +6,26 @@
 ; Silent install:
 ;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=abc123
 ;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://... /EnrollmentToken=... /SshLogin=DOMAIN\user /DIR="C:\Custom\Path"
+;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://... /EnrollmentToken=... /AllowPort22=1
+;
+; Silent upgrade over an existing installation (this is what the server runs
+; remotely — see FleetManager-Server, services/agent_update.py):
+;   FleetManagerAgent-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+; ServerUrl and EnrollmentToken may be omitted: server address, agent id, agent
+; token and SSH key are read from the existing agent.json and written back, so
+; the agent keeps its registration instead of enrolling again.
+;
+; By default only port 5022 (the Ansible management port) is opened; sshd is
+; configured to listen solely on 5022 and any pre-existing inbound firewall
+; rule that allows port 22 is detected and removed. Pass /AllowPort22=1 to
+; skip that check and leave whatever port-22 firewall state already exists.
 ;
 ; Silent uninstall (includes remote server cleanup):
 ;   "%ProgramFiles%\FleetManager Agent\unins000.exe" /VERYSILENT
 ;
 ; Build: run build-installer.ps1 (requires .NET SDK 8+ and Inno Setup 6 with ISPP).
+; This is the single source of truth for install steps — there is no separate
+; install.ps1; the PowerShell below is generated and run in CurStepChanged.
 
 #ifndef AppVersion
   #define AppVersion "1.0"
@@ -91,16 +106,128 @@ var
   GServerUrl:       string;
   GEnrollmentToken: string;
   GSshLogin:        string;
+  GAllowPort22:     Boolean;
+  GExistingConfig:  string;   // agent.json предыдущей установки (пусто при первой установке)
+  GUpgrade:         Boolean;  // поверх уже зарегистрированного агента
+
+function DataRootDir: string;
+begin
+  Result := ExpandConstant('{commonappdata}') + '\FleetManagerAgent';
+end;
+
+// Читает agent.json предыдущей установки. Пустая строка — файла нет.
+function ReadExistingConfig: string;
+var
+  Raw: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(DataRootDir + '\agent.json', Raw) then
+    Result := String(Raw);
+end;
+
+// Значение строкового ключа из плоского JSON (agent.json именно такой).
+// Поиск ключа регистронезависим: установщик пишет PascalCase, а сам агент
+// перезаписывает файл camelCase-именами (JsonSerializerDefaults.Web).
+function JsonString(const Json, Key: string): string;
+var
+  Position, Index: Integer;
+  Pattern: string;
+  Current: Char;
+begin
+  Result := '';
+  if Json = '' then Exit;
+
+  Pattern := '"' + Key + '"';
+  Position := Pos(Lowercase(Pattern), Lowercase(Json));
+  if Position = 0 then Exit;
+
+  Index := Position + Length(Pattern);
+  while (Index <= Length(Json)) and (Json[Index] <> ':') do Index := Index + 1;
+  Index := Index + 1;
+  while (Index <= Length(Json)) and ((Json[Index] = ' ') or (Json[Index] = Chr(9))) do Index := Index + 1;
+  // null и числа строковым значением не считаем — вызывающий подставит умолчание.
+  if (Index > Length(Json)) or (Json[Index] <> '"') then Exit;
+
+  Index := Index + 1;
+  while Index <= Length(Json) do
+  begin
+    Current := Json[Index];
+    if (Current = '\') and (Index < Length(Json)) then
+    begin
+      Current := Json[Index + 1];
+      if      Current = 'n' then Result := Result + Chr(10)
+      else if Current = 'r' then Result := Result + Chr(13)
+      else if Current = 't' then Result := Result + Chr(9)
+      else                       Result := Result + Current;
+      Index := Index + 2;
+      Continue;
+    end;
+    if Current = '"' then Break;
+    Result := Result + Current;
+    Index := Index + 1;
+  end;
+end;
+
+// Целое значение ключа из плоского JSON; Default — если ключа нет или он не число.
+function JsonInteger(const Json, Key: string; Default: Integer): Integer;
+var
+  Position, Index: Integer;
+  Pattern, Digits: string;
+begin
+  Result := Default;
+  if Json = '' then Exit;
+
+  Pattern := '"' + Key + '"';
+  Position := Pos(Lowercase(Pattern), Lowercase(Json));
+  if Position = 0 then Exit;
+
+  Index := Position + Length(Pattern);
+  while (Index <= Length(Json)) and (Json[Index] <> ':') do Index := Index + 1;
+  Index := Index + 1;
+  while (Index <= Length(Json)) and ((Json[Index] = ' ') or (Json[Index] = Chr(9))) do Index := Index + 1;
+
+  Digits := '';
+  while (Index <= Length(Json)) and (Json[Index] >= '0') and (Json[Index] <= '9') do
+  begin
+    Digits := Digits + Json[Index];
+    Index := Index + 1;
+  end;
+  if Digits <> '' then Result := StrToIntDef(Digits, Default);
+end;
+
+// Пара "Key":"Value" для agent.json; пустые значения не пишем, чтобы не затирать
+// поля, которые агент заполняет сам.
+function JsonPair(const Key, Value: string): string;
+begin
+  if Trim(Value) = '' then
+    Result := ''
+  else
+    Result := '"' + Key + '":"' + JsonEscape(Value) + '",';
+end;
 
 function InitializeSetup(): Boolean;
 var
-  InstallRootParam: string;
+  InstallRootParam, AllowPort22Param: string;
 begin
   GServerUrl        := Trim(ExpandConstant('{param:ServerUrl|}'));
   GEnrollmentToken  := Trim(ExpandConstant('{param:EnrollmentToken|}'));
   GSshLogin         := Trim(ExpandConstant('{param:SshLogin|}'));
 
-  // /InstallRoot=... accepted as an alias for /DIR=... (parity with install.ps1)
+  // Режим обновления: агент уже установлен и зарегистрирован на сервере.
+  // Тогда ни ServerUrl, ни EnrollmentToken передавать не нужно — они берутся
+  // из agent.json, и регистрация не повторяется (см. удалённое обновление в
+  // FleetManager-Server, services/agent_update.py).
+  GExistingConfig := ReadExistingConfig;
+  if GServerUrl = '' then
+    GServerUrl := Trim(JsonString(GExistingConfig, 'ServerUrl'));
+  GUpgrade := (Trim(JsonString(GExistingConfig, 'AgentToken')) <> '') and (GServerUrl <> '');
+
+  // /AllowPort22=1 skips the default port-22 firewall check/close step.
+  AllowPort22Param := Trim(ExpandConstant('{param:AllowPort22|}'));
+  GAllowPort22 := (AllowPort22Param <> '') and (CompareText(AllowPort22Param, '0') <> 0)
+    and (CompareText(AllowPort22Param, 'false') <> 0);
+
+  // /InstallRoot=... accepted as an alias for /DIR=...
   InstallRootParam := Trim(ExpandConstant('{param:InstallRoot|}'));
   if InstallRootParam <> '' then
     WizardForm.DirEdit.Text := InstallRootParam;
@@ -121,10 +248,10 @@ begin
     Exit;
   end;
 
-  if GEnrollmentToken = '' then
+  if (GEnrollmentToken = '') and (not GUpgrade) then
   begin
     if not WizardSilent() then
-      MsgBox('EnrollmentToken is required.' + Chr(13) + Chr(10) + 'Example: /EnrollmentToken=your-token', mbError, MB_OK);
+      MsgBox('EnrollmentToken is required for a first-time install.' + Chr(13) + Chr(10) + 'Example: /EnrollmentToken=your-token', mbError, MB_OK);
     Result := False;
     Exit;
   end;
@@ -135,17 +262,20 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   InstallRoot, DataRoot, ServiceExe, TrayExe: string;
-  Config, Script: string;
+  Config, Script, AllowPort22Literal: string;
   UserDomain, UserName, ComputerName: string;
 begin
   if CurStep <> ssPostInstall then Exit;
 
   InstallRoot := ExpandConstant('{app}');
-  DataRoot    := ExpandConstant('{commonappdata}') + '\FleetManagerAgent';
+  DataRoot    := DataRootDir;
   ServiceExe  := InstallRoot + '\FleetManager.Agent.Service.exe';
   TrayExe     := InstallRoot + '\FleetManager.Agent.Tray.exe';
 
-  // Determine default SSH login (mirrors install.ps1 logic)
+  // Determine default SSH login: the one from the previous install, otherwise
+  // the current interactive domain\user, or local user.
+  if GSshLogin = '' then
+    GSshLogin := Trim(JsonString(GExistingConfig, 'SshLogin'));
   if GSshLogin = '' then
   begin
     UserDomain   := GetEnv('USERDOMAIN');
@@ -157,13 +287,23 @@ begin
       GSshLogin := UserName;
   end;
 
-  // Write agent.json (must happen before the PowerShell script so logs dir exists)
+  if GAllowPort22 then AllowPort22Literal := 'true' else AllowPort22Literal := 'false';
+
+  // Write agent.json (must happen before the PowerShell script so logs dir exists).
+  // On an upgrade the registration (AgentId/AgentToken/SshPublicKey) is carried
+  // over: without it the agent would re-register and the server would issue a new
+  // token and SSH key on every update.
   ForceDirectories(DataRoot + '\logs');
   Config :=
-    '{"ServerUrl":"'        + JsonEscape(GServerUrl)       +
-    '","EnrollmentToken":"' + JsonEscape(GEnrollmentToken) +
-    '","SshLogin":"'        + JsonEscape(GSshLogin)        +
-    '","SyncIntervalMinutes":5}';
+    '{' +
+    JsonPair('ServerUrl',       GServerUrl) +
+    JsonPair('EnrollmentToken', GEnrollmentToken) +
+    JsonPair('AgentId',         JsonString(GExistingConfig, 'AgentId')) +
+    JsonPair('AgentToken',      JsonString(GExistingConfig, 'AgentToken')) +
+    JsonPair('SshPublicKey',    JsonString(GExistingConfig, 'SshPublicKey')) +
+    JsonPair('SshLogin',        GSshLogin) +
+    '"SyncIntervalMinutes":' + IntToStr(JsonInteger(GExistingConfig, 'SyncIntervalMinutes', 5)) +
+    '}';
   SaveStringToFile(DataRoot + '\agent.json', Config, False);
 
   // Build and run the install PowerShell script.
@@ -181,6 +321,7 @@ begin
     '$serviceExe  = ''' + ServiceExe + '''' + NL +
     '$trayExe     = ''' + TrayExe + '''' + NL +
     '$installRoot = ''' + InstallRoot + '''' + NL +
+    '$allowPort22 = $' + AllowPort22Literal + NL +
     'Log ''=== FleetManager Agent install script started ==''' + NL +
     '' + NL +
     '# OpenSSH Server — non-fatal: agent works even if this step is skipped' + NL +
@@ -190,25 +331,48 @@ begin
     '        Log ''Installing OpenSSH Server...''' + NL +
     '        Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null' + NL +
     '    }' + NL +
-    '    # Configure sshd to also listen on port 5022 (used by Ansible)' + NL +
+    '    # sshd listens ONLY on the Ansible management port 5022 by default.' + NL +
+    '    # The rewrite+restart is skipped when sshd already listens on 5022 only:' + NL +
+    '    # a remote update runs over that very SSH session, and restarting sshd' + NL +
+    '    # would drop it before the installer reports its result.' + NL +
     '    $sshdConfig = ''C:\ProgramData\ssh\sshd_config''' + NL +
+    '    $sshdNeedsUpdate = $true' + NL +
     '    if (Test-Path $sshdConfig) {' + NL +
-    '        $cfg = Get-Content $sshdConfig -Raw' + NL +
-    '        if ($cfg -notmatch ''Port 5022'') { Add-Content $sshdConfig "`nPort 5022" }' + NL +
+    '        $ports = @(@(Get-Content $sshdConfig) | Where-Object { $_ -match ''^\s*Port\s+\d+\s*$'' })' + NL +
+    '        if (($ports.Count -eq 1) -and ($ports[0] -match ''^\s*Port\s+5022\s*$'')) { $sshdNeedsUpdate = $false }' + NL +
+    '    }' + NL +
+    '    if ($sshdNeedsUpdate) {' + NL +
+    '        if (Test-Path $sshdConfig) {' + NL +
+    '            $lines = @(Get-Content $sshdConfig) | Where-Object { $_ -notmatch ''^\s*Port\s+\d+\s*$'' }' + NL +
+    '            Set-Content $sshdConfig -Value (@(''Port 5022'') + $lines)' + NL +
+    '        } else {' + NL +
+    '            Set-Content $sshdConfig ''Port 5022''' + NL +
+    '        }' + NL +
+    '        Restart-Service sshd -Force -ErrorAction SilentlyContinue' + NL +
+    '        Log ''sshd reconfigured for port 5022''' + NL +
     '    } else {' + NL +
-    '        Set-Content $sshdConfig ''Port 22'' + "`n" + ''Port 5022''' + NL +
+    '        Log ''sshd already listens on 5022 only; restart skipped''' + NL +
     '    }' + NL +
     '    Set-Service -Name sshd -StartupType Automatic' + NL +
-    '    Restart-Service sshd -Force -ErrorAction SilentlyContinue' + NL +
-    '    # Firewall: standard SSH port 22' + NL +
-    '    if (-not (Get-NetFirewallRule -Name OpenSSH-Server-In-TCP -ErrorAction SilentlyContinue)) {' + NL +
-    '        New-NetFirewallRule -Name OpenSSH-Server-In-TCP -DisplayName ''OpenSSH Server (sshd)'' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null' + NL +
-    '    }' + NL +
-    '    # Firewall: Ansible SSH port 5022' + NL +
+    '    # Firewall: Ansible SSH port 5022 — the only SSH port opened by default' + NL +
     '    if (-not (Get-NetFirewallRule -Name FleetManager-Agent-SSH-5022 -ErrorAction SilentlyContinue)) {' + NL +
     '        New-NetFirewallRule -Name FleetManager-Agent-SSH-5022 -DisplayName ''FleetManager Agent SSH (5022)'' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 5022 | Out-Null' + NL +
     '    }' + NL +
-    '    Log ''OpenSSH OK (ports 22 + 5022)''' + NL +
+    '    # Port 22: closed by default (removes any pre-existing allow rule, incl.' + NL +
+    '    # the OpenSSH capability''s own default rule). Skippable with /AllowPort22=1.' + NL +
+    '    if ($allowPort22) {' + NL +
+    '        Log ''Port 22 check skipped (/AllowPort22)''' + NL +
+    '    } else {' + NL +
+    '        $port22Rules = @(Get-NetFirewallRule -Direction Inbound -Action Allow -ErrorAction SilentlyContinue |' + NL +
+    '            Where-Object { $_.Enabled -eq ''True'' -and (($_ | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue).LocalPort -contains ''22'') })' + NL +
+    '        if ($port22Rules) {' + NL +
+    '            $port22Rules | Remove-NetFirewallRule -ErrorAction SilentlyContinue' + NL +
+    '            Log "Port 22 closed ($($port22Rules.Count) firewall rule(s) removed)"' + NL +
+    '        } else {' + NL +
+    '            Log ''Port 22 already closed''' + NL +
+    '        }' + NL +
+    '    }' + NL +
+    '    Log ''OpenSSH OK (port 5022)''' + NL +
     '} catch {' + NL +
     '    Log "OpenSSH warning (non-fatal): $_"' + NL +
     '}' + NL +

@@ -27,6 +27,7 @@ public sealed class FleetManagerApiClient
             ip_address = (string?)null,
             os = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) ? "windows_11" : "windows_10",
             status = "online",
+            agent_version = AgentVersion.Current,
             hardware = new
             {
                 manufacturer = snapshot.Hardware.Manufacturer,
@@ -68,7 +69,8 @@ public sealed class FleetManagerApiClient
             hostname,
             ssh_login = sshLogin,
             ip_address = (string?)null,
-            os = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) ? "windows_11" : "windows_10"
+            os = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) ? "windows_11" : "windows_10",
+            agent_version = AgentVersion.Current
         };
         using var response = await _httpClient.PostAsJsonAsync($"{AgentConfiguration.DefaultApiPath}/register", payload, JsonDefaults.Options, cancellationToken);
         if (!response.IsSuccessStatusCode)

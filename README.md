@@ -13,7 +13,7 @@ Windows-агент для Fleet Manager. Вариант 1 состоит из с
 - `src/FleetManager.Agent.Service` — фоновая служба: периодический сбор железа/ПО, heartbeat и обработка локальных команд.
 - `src/FleetManager.Agent.Tray` — неэле­вированный процесс в области уведомлений; открывает Control через `runas`.
 - `src/FleetManager.Agent.Control` — WinForms-панель с manifest `requireAdministrator`.
-- `installer` — PowerShell-установка/удаление, OpenSSH Server, firewall, служба и автозапуск tray.
+- `installer` — `FleetManagerAgent.iss` (Inno Setup; единственный источник логики установки — OpenSSH Server, firewall, порт 5022, служба, автозапуск tray) и `uninstall.ps1` (ручное локальное удаление вне пакета).
 
 ## Сборка
 
@@ -23,9 +23,9 @@ dotnet publish src/FleetManager.Agent.Tray/FleetManager.Agent.Tray.csproj -c Rel
 dotnet publish src/FleetManager.Agent.Control/FleetManager.Agent.Control.csproj -c Release -r win-x64 --self-contained true -o publish/win-x64
 ```
 
-После публикации запустите `installer\install.ps1 -ServerUrl https://fleet.example` из PowerShell от имени администратора. Конфигурация и логи находятся в `%ProgramData%\FleetManagerAgent`.
+Установка выполняется только через собранный Inno Setup EXE-установщик (см. ниже) — отдельного `install.ps1` в репозитории нет, вся логика установки встроена в `installer\FleetManagerAgent.iss`. Конфигурация и логи находятся в `%ProgramData%\FleetManagerAgent`.
 
-Сервис регистрируется через enrollment-токен и шлёт heartbeat (железо + ПО) на `/api/agent/heartbeat` сервера Fleet Manager.
+Сервис регистрируется через enrollment-токен и шлёт heartbeat (железо + ПО + версия агента) на `/api/agent/heartbeat` сервера Fleet Manager.
 
 ## Установщик (Inno Setup)
 
@@ -41,6 +41,22 @@ dotnet publish src/FleetManager.Agent.Control/FleetManager.Agent.Control.csproj 
 
 ```powershell
 FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=your-token
+```
+
+### Обновление поверх установленного агента
+
+Тот же EXE ставится поверх существующей установки — в этом режиме `ServerUrl` и `EnrollmentToken` не нужны:
+
+```powershell
+FleetManagerAgent-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+```
+
+Адрес сервера, идентификатор агента, agent-токен и SSH-ключ переносятся из существующего `%ProgramData%\FleetManagerAgent\agent.json`, поэтому агент остаётся зарегистрированным на том же хосте. Fleet Manager запускает эту же команду удалённо по SSH («Обновить агент» в реестре хостов), а версия из сборки уходит на сервер в heartbeat.
+
+По умолчанию открывается только порт **5022** (используется Ansible для управления хостом): sshd настраивается слушать исключительно его, а любое уже существующее разрешающее правило firewall для порта 22 обнаруживается и удаляется. Чтобы пропустить эту проверку и оставить состояние порта 22 как есть, добавьте `/AllowPort22=1`:
+
+```powershell
+FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=your-token /AllowPort22=1
 ```
 
 ## Тесты

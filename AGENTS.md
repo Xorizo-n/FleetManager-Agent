@@ -6,17 +6,18 @@ Windows-агент Fleet Manager: служба, отправляющая heartbe
 
 ## Карта проекта
 
-- `src/FleetManager.Agent.Core` — конфигурация, machine-id, состояние, журнал, Named Pipe, API-клиент, сбор инвентаризации. Общая библиотека для остальных трёх проектов.
+- `src/FleetManager.Agent.Core` — конфигурация, machine-id, состояние, журнал, Named Pipe, API-клиент, сбор инвентаризации, версия агента (`AgentVersion.cs`). Общая библиотека для остальных трёх проектов.
 - `src/FleetManager.Agent.Service` — фоновая служба Windows: периодический сбор железа/ПО, heartbeat, обработка локальных команд.
 - `src/FleetManager.Agent.Tray` — неэлевированный процесс в трее; открывает Control через `runas`.
 - `src/FleetManager.Agent.Control` — WinForms-панель с manifest `requireAdministrator`.
-- `installer/` — `install.ps1`/`uninstall.ps1` (OpenSSH Server, firewall, служба, автозапуск tray), `FleetManagerAgent.iss` (Inno Setup script).
+- `installer/` — `FleetManagerAgent.iss` (Inno Setup script; единственный источник логики установки — весь install-код генерируется и исполняется прямо в `CurStepChanged`: OpenSSH Server, firewall/порт 5022, служба, автозапуск tray) и `uninstall.ps1` (отдельный скрипт для ручного/удалённого удаления вне пакета). Отдельного `install.ps1` больше нет — не создавайте его заново, любые изменения install-логики вносите в `.iss`.
+- Установка поверх уже зарегистрированного агента — режим обновления: `ServerUrl` и `EnrollmentToken` можно не передавать, `AgentId`/`AgentToken`/`SshPublicKey`/`SshLogin` переносятся из существующего `agent.json`, поэтому агент не перерегистрируется и не получает новый SSH-ключ. Именно так сервер обновляет агентов удалённо. `agent.json` читается регистронезависимо: установщик пишет PascalCase, служба перезаписывает файл camelCase.
 - `tests/FleetManager.Agent.Core.Tests` — dotnet-тесты Core; `installer/` также покрыт Pester-тестами (`tests/install_script.tests.ps1`).
-- `build-installer.ps1` — локальный пайплайн: dotnet publish (Service/Tray/Control) → Inno Setup → `dist/FleetManagerAgent-Setup.exe`. Требует Windows, .NET SDK 8+, Inno Setup 6 (с ISPP).
+- `build-installer.ps1` — локальный пайплайн: dotnet publish (Service/Tray/Control) → Inno Setup → `dist/FleetManagerAgent-Setup.exe`. Требует Windows, .NET SDK 8+, Inno Setup 6 (с ISPP). Один и тот же `-AppVersion` уходит и в `-p:Version` сборок, и в `/DAppVersion` установщика — на этом держится учёт версий на сервере, не разводите их.
 
 ## Связанные репозитории
 
-- [FleetManager-Server](https://github.com/Xorizo-n/FleetManager-Server) — принимает heartbeat/инвентаризацию (`routers/agent.py`) и автоматически подтягивает свежий инсталлятор из GitHub Releases этого репозитория (`backend/services/agent_installer_sync.py`, почасово через Celery beat + кнопка «Проверить обновление агента» в UI).
+- [FleetManager-Server](https://github.com/Xorizo-n/FleetManager-Server) — принимает heartbeat/инвентаризацию (`routers/agent.py`) и автоматически подтягивает свежий инсталлятор из GitHub Releases этого репозитория (`backend/services/agent_installer_sync.py`, почасово через Celery beat + кнопка «Проверить обновление агента» в UI). Он же хранит установленную версию агента по хостам и обновляет агентов удалённо (`backend/services/agent_update.py`): хост скачивает установщик сам через `GET /api/agent/installer` своим agent-токеном.
 - [RTF_OOD_AnsiblePlaybooks](https://github.com/kozlov174/RTF_OOD_AnsiblePlaybooks) — плейбуки, которые сервер запускает на хостах с этим агентом.
 
 ## Ветвление и CI/CD
@@ -32,6 +33,7 @@ Windows-агент Fleet Manager: служба, отправляющая heartbe
 
 ```powershell
 dotnet test tests/FleetManager.Agent.Core.Tests/FleetManager.Agent.Core.Tests.csproj
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/install_script.tests.ps1
 ```
 
 ## Запреты
