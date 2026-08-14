@@ -73,6 +73,18 @@ if ($iss -notmatch 'if CurStep = ssInstall[\s\S]{0,2400}Exit;\s*end;[\s\S]{0,50}
     throw 'The ssInstall handler must Exit before falling through to the ssPostInstall logic.'
 }
 
+# Tray продолжает работать бессрочно; если он унаследует stdout/stderr SSH-канала,
+# на котором выполняется удалённое обновление, sshd не увидит EOF и клиент (Ansible
+# на сервере) зависнет в ожидании завершения команды даже после успешной установки —
+# воспроизведено на продакшн-хосте: служба уже работала на новой версии, пока
+# задача обновления всё ещё висела "running".
+if (-not $iss.Contains('/c start `"`" /B `"$trayExe`""')) {
+    throw 'Tray must be launched via cmd /c start (detached, non-inherited stdio) — otherwise a remote update over SSH hangs waiting for Tray (which never exits) to release the channel.'
+}
+if ($iss.Contains('$sh = New-Object -ComObject Shell.Application')) {
+    throw 'Tray must not be launched via ShellExecute COM — its stdio inherits this script''s handles, which is what caused the hang cmd /c start fixes.'
+}
+
 if ($uninstaller -notmatch "@\('FleetManager\.Agent\.Tray',\s*'FleetManager\.Agent\.Control'\)[\s\S]{0,80}Get-Process") {
     throw 'Uninstaller must stop the tray process before deleting files.'
 }
