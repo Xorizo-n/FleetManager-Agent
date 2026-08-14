@@ -91,12 +91,17 @@ if (-not $SkipPublish) {
     foreach ($proj in $Projects) {
         $projPath = Join-Path $AgentRoot $proj
         Write-Host "    dotnet publish $proj" -ForegroundColor Gray
+        # Version/InformationalVersion — тот же номер, что уходит в AppVersion
+        # установщика: агент сообщает его серверу в heartbeat, а сервер сверяет
+        # с DisplayVersion записи удаления Windows.
         dotnet publish $projPath `
             --configuration Release `
             --runtime win-x64 `
             --self-contained true `
             --output $PublishOut `
-            /p:PublishSingleFile=false
+            /p:PublishSingleFile=false `
+            "/p:Version=$AppVersion" `
+            "/p:InformationalVersion=$AppVersion"
         if ($LASTEXITCODE -ne 0) {
             throw "dotnet publish failed for $proj (exit $LASTEXITCODE)"
         }

@@ -25,7 +25,7 @@ dotnet publish src/FleetManager.Agent.Control/FleetManager.Agent.Control.csproj 
 
 Установка выполняется только через собранный Inno Setup EXE-установщик (см. ниже) — отдельного `install.ps1` в репозитории нет, вся логика установки встроена в `installer\FleetManagerAgent.iss`. Конфигурация и логи находятся в `%ProgramData%\FleetManagerAgent`.
 
-Сервис регистрируется через enrollment-токен и шлёт heartbeat (железо + ПО) на `/api/agent/heartbeat` сервера Fleet Manager.
+Сервис регистрируется через enrollment-токен и шлёт heartbeat (железо + ПО + версия агента) на `/api/agent/heartbeat` сервера Fleet Manager.
 
 ## Установщик (Inno Setup)
 
@@ -42,6 +42,16 @@ dotnet publish src/FleetManager.Agent.Control/FleetManager.Agent.Control.csproj 
 ```powershell
 FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=your-token
 ```
+
+### Обновление поверх установленного агента
+
+Тот же EXE ставится поверх существующей установки — в этом режиме `ServerUrl` и `EnrollmentToken` не нужны:
+
+```powershell
+FleetManagerAgent-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+```
+
+Адрес сервера, идентификатор агента, agent-токен и SSH-ключ переносятся из существующего `%ProgramData%\FleetManagerAgent\agent.json`, поэтому агент остаётся зарегистрированным на том же хосте. Fleet Manager запускает эту же команду удалённо по SSH («Обновить агент» в реестре хостов), а версия из сборки уходит на сервер в heartbeat.
 
 По умолчанию открывается только порт **5022** (используется Ansible для управления хостом): sshd настраивается слушать исключительно его, а любое уже существующее разрешающее правило firewall для порта 22 обнаруживается и удаляется. Чтобы пропустить эту проверку и оставить состояние порта 22 как есть, добавьте `/AllowPort22=1`:
 
