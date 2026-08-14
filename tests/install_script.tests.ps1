@@ -58,10 +58,18 @@ if (-not $iss.Contains('$sshdNeedsUpdate')) {
 # "fatal error during installation" (exit code 5), потому что сама служба ещё
 # держит FleetManager.Agent.Service.exe открытым, а CloseApplicationsFilter
 # покрывает только Tray/Control, не сервис.
-if ($iss -notmatch 'if CurStep = ssInstall[\s\S]{0,1600}Stop-Service FleetManagerAgent') {
+if ($iss -notmatch 'if CurStep = ssInstall[\s\S]{0,1900}Stop-Service FleetManagerAgent') {
     throw 'Installer must stop the service at ssInstall, before Files are copied — CloseApplicationsFilter does not cover the service exe.'
 }
-if ($iss -notmatch 'if CurStep = ssInstall[\s\S]{0,1700}Exit;\s*end;[\s\S]{0,50}if CurStep <> ssPostInstall') {
+# CloseApplicationsFilter одного Tray/Control недостаточно: подтверждено на
+# продакшн-хосте, где оба процесса остались запущены после проваленного
+# обновления и держали открытыми общие DLL рантайма (все три проекта
+# публикуются в одну и ту же папку) — файлы всё равно не копировались.
+# ssInstall должен убивать их напрямую, как уже делает uninstall.ps1.
+if ($iss -notmatch 'if CurStep = ssInstall[\s\S]{0,1900}Stop-Process -Force[\s\S]{0,200}FleetManager\.Agent\.Tray[\s\S]{0,200}FleetManager\.Agent\.Control') {
+    throw 'Installer must kill Tray/Control at ssInstall too, not just rely on CloseApplicationsFilter — it was observed to leave both running after a failed update.'
+}
+if ($iss -notmatch 'if CurStep = ssInstall[\s\S]{0,2400}Exit;\s*end;[\s\S]{0,50}if CurStep <> ssPostInstall') {
     throw 'The ssInstall handler must Exit before falling through to the ssPostInstall logic.'
 }
 

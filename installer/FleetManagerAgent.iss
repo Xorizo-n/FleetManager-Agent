@@ -267,14 +267,21 @@ var
 begin
   if CurStep = ssInstall then
   begin
-    // Stop the service BEFORE Setup copies [Files]: CloseApplicationsFilter only
-    // covers Tray/Control, so on an in-place upgrade the running service keeps
-    // FleetManager.Agent.Service.exe locked and Setup fails ("fatal error during
-    // installation", exit code 5) before ever reaching ssPostInstall below, which
-    // is where the service used to get stopped — too late for the copy that just
-    // failed. This is what a remote update (FleetManager-Server,
-    // services/agent_update.py) always hits, since the very definition of an
-    // in-place update is that the old service is still running when it starts.
+    // Stop the service AND kill Tray/Control BEFORE Setup copies [Files]. All
+    // three projects publish into the same output folder (build-installer.ps1),
+    // so Tray/Control keep the shared runtime DLLs locked even once the service
+    // is stopped — confirmed on a production host where CloseApplicationsFilter
+    // left both still running after a failed update. Setup's own Restart-Manager
+    // based CloseApplications isn't reliable enough here either (same host), so
+    // this kills them directly, the same way uninstall.ps1 already does, instead
+    // of depending on it.
+    //
+    // Without this, an in-place upgrade fails with a fatal "file in use" error
+    // (exit code 5) before ever reaching ssPostInstall below, where the service
+    // used to get stopped — too late for the copy that already failed. This is
+    // what a remote update (FleetManager-Server, services/agent_update.py) always
+    // hits, since the very definition of an in-place update is that the old
+    // service (and often Tray/Control) is still running when it starts.
     ForceDirectories(DataRootDir + '\logs');
     RunPowerShellScript(
       '$logFile = ''' + DataRootDir + '\logs\install.log''' + NL +
@@ -282,10 +289,13 @@ begin
       'if (Get-Service FleetManagerAgent -ErrorAction SilentlyContinue) {' + NL +
       '    Log ''Stopping running service before file copy (in-place upgrade)...''' + NL +
       '    Stop-Service FleetManagerAgent -Force -ErrorAction SilentlyContinue' + NL +
-      '    $deadline = (Get-Date).AddSeconds(15)' + NL +
-      '    while ((Get-Process -Name ''FleetManager.Agent.Service'' -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }' + NL +
-      '    Log ''Service stopped, proceeding with file copy''' + NL +
-      '}' + NL);
+      '}' + NL +
+      'foreach ($p in @(''FleetManager.Agent.Tray'', ''FleetManager.Agent.Control'')) {' + NL +
+      '    Get-Process -Name $p -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue' + NL +
+      '}' + NL +
+      '$deadline = (Get-Date).AddSeconds(15)' + NL +
+      'while ((Get-Process -Name ''FleetManager.Agent.Service'',''FleetManager.Agent.Tray'',''FleetManager.Agent.Control'' -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }' + NL +
+      'Log ''Service and Tray/Control stopped, proceeding with file copy''' + NL);
     Exit;
   end;
 
