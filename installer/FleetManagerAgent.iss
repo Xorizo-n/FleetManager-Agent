@@ -437,10 +437,21 @@ begin
     '    Log "Run key warning: $_"' + NL +
     '}' + NL +
     '' + NL +
-    '# Launch Tray in the interactive user session (not the elevated installer context)' + NL +
+    '# Launch Tray in the interactive user session (not the elevated installer context),' + NL +
+    '# detached via cmd /c start rather than ShellExecute so it does not inherit this' + NL +
+    '# script''s own stdio handles: on a remote update this whole install runs over a' + NL +
+    '# non-interactive SSH exec channel, and Tray keeps running indefinitely, so if it' + NL +
+    '# inherits that channel''s stdout/stderr pipe, sshd never sees EOF and the SSH' + NL +
+    '# client (Ansible on the FleetManager server) hangs waiting for the command to' + NL +
+    '# return even though installation already finished — confirmed on a production' + NL +
+    '# host where the service was already running the new version while the update' + NL +
+    '# task was still stuck "running" minutes later. Start-Process -RedirectStandard*' + NL +
+    '# was tried first but rejects NUL (relative NUL 404s; \\.\NUL collides because' + NL +
+    '# stdout/stderr can''t redirect to the same resolved path) — cmd /c start sidesteps' + NL +
+    '# all of that by detaching the child the same way any other backgrounded cmd job does.' + NL +
     'try {' + NL +
-    '    $sh = New-Object -ComObject Shell.Application' + NL +
-    '    $sh.ShellExecute($trayExe, $null, $installRoot, ''open'', 1)' + NL +
+    '    Start-Process -FilePath ''cmd.exe'' -WorkingDirectory $installRoot -WindowStyle Hidden ' +
+             '-ArgumentList "/c start `"`" /B `"$trayExe`""' + NL +
     '    Log ''Tray launched''' + NL +
     '} catch {' + NL +
     '    Log "Tray launch warning (starts at next logon): $_"' + NL +
