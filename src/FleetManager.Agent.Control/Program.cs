@@ -23,6 +23,7 @@ internal sealed class ControlForm : Form
     public ControlForm()
     {
         Text = "FleetManager Agent — управление";
+        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         Width = 760;
         Height = 520;
         StartPosition = FormStartPosition.CenterScreen;
