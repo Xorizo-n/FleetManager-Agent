@@ -53,6 +53,18 @@ if (-not $iss.Contains('$sshdNeedsUpdate')) {
     throw 'Installer must skip the sshd rewrite/restart when sshd already listens on 5022 only.'
 }
 
+# Файлы [Files] копируются Inno Setup на шаге ssInstall, до ssPostInstall — если
+# служба останавливается только в ssPostInstall, in-place обновление падает с
+# "fatal error during installation" (exit code 5), потому что сама служба ещё
+# держит FleetManager.Agent.Service.exe открытым, а CloseApplicationsFilter
+# покрывает только Tray/Control, не сервис.
+if ($iss -notmatch 'if CurStep = ssInstall[\s\S]{0,1600}Stop-Service FleetManagerAgent') {
+    throw 'Installer must stop the service at ssInstall, before Files are copied — CloseApplicationsFilter does not cover the service exe.'
+}
+if ($iss -notmatch 'if CurStep = ssInstall[\s\S]{0,1700}Exit;\s*end;[\s\S]{0,50}if CurStep <> ssPostInstall') {
+    throw 'The ssInstall handler must Exit before falling through to the ssPostInstall logic.'
+}
+
 if ($uninstaller -notmatch "@\('FleetManager\.Agent\.Tray',\s*'FleetManager\.Agent\.Control'\)[\s\S]{0,80}Get-Process") {
     throw 'Uninstaller must stop the tray process before deleting files.'
 }

@@ -29,7 +29,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add("Выход", null, (_, _) => ExitThread());
         _notifyIcon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application,
             Text = "FleetManager Agent: запуск...",
             Visible = true,
             ContextMenuStrip = menu
