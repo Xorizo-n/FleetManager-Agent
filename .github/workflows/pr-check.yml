@@ -1,0 +1,34 @@
+name: PR check
+
+# Tests + a full installer build for pull requests into main. Nothing is
+# published here: releases come only from build-installer.yml on push to main.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Core tests
+        run: dotnet test tests/FleetManager.Agent.Core.Tests/FleetManager.Agent.Core.Tests.csproj
+
+      - name: Installer script tests
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/install_script.tests.ps1
+
+      - name: Build installer (compiles the .iss Pascal script)
+        shell: pwsh
+        run: .\build-installer.ps1 -AppVersion "0.0.0.${{ github.run_number }}"
