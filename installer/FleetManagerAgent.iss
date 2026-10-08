@@ -8,6 +8,15 @@
 ;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://... /EnrollmentToken=... /SshLogin=DOMAIN\user /DIR="C:\Custom\Path"
 ;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://... /EnrollmentToken=... /SshSourceAddress=10.40.240.154,10.40.0.0/24
 ;
+; Provisioning a PC deployed from an image (AutoDomain runs this right after the
+; domain join, before the reboot that applies the new computer name):
+;   FleetManagerAgent-Setup.exe /VERYSILENT ... /DeferStart=1 /ResetSshHostKeys=1
+; /DeferStart creates the service with delayed auto-start but does not start it
+; (nor the tray), so the agent first registers after the reboot, under the new
+; name. /ResetSshHostKeys deletes the SSH host keys inherited from the reference
+; machine; sshd generates this PC's own. A fresh install (no AgentToken in
+; agent.json) also drops a leftover machine-id, so clones never share one.
+;
 ; Silent upgrade over an existing installation (this is what the server runs
 ; remotely — see FleetManager-Server, services/agent_update.py):
 ;   FleetManagerAgent-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
@@ -99,6 +108,11 @@ begin
   Result := '''' + Escaped + '''';
 end;
 
+function PsBool(const Value: Boolean): string;
+begin
+  if Value then Result := '$true' else Result := '$false';
+end;
+
 // Write a self-contained PowerShell script to a temp file and execute it.
 // Using -File avoids the quoting and length limits of -Command "...".
 procedure RunPowerShellScript(const Script: string);
@@ -121,6 +135,17 @@ var
   GSshSource:       string;   // откуда разрешён SSH; пусто — адрес хоста из ServerUrl
   GExistingConfig:  string;   // agent.json предыдущей установки (пусто при первой установке)
   GUpgrade:         Boolean;  // поверх уже зарегистрированного агента
+  GDeferStart:      Boolean;  // /DeferStart: служба стартует только после перезагрузки
+  GResetSshHostKeys: Boolean; // /ResetSshHostKeys: заменить SSH-ключи хоста, унаследованные от эталона
+
+// Флаг командной строки: /Name=1 (любое непустое значение, кроме 0 и false).
+function ParamFlag(const Name: string): Boolean;
+var
+  Value: string;
+begin
+  Value := Trim(ExpandConstant('{param:' + Name + '|}'));
+  Result := (Value <> '') and (CompareText(Value, '0') <> 0) and (CompareText(Value, 'false') <> 0);
+end;
 
 function DataRootDir: string;
 begin
@@ -242,6 +267,9 @@ begin
   if GSshSource = '' then
     GSshSource := Trim(JsonString(GExistingConfig, 'SshSourceAddress'));
 
+  GDeferStart       := ParamFlag('DeferStart');
+  GResetSshHostKeys := ParamFlag('ResetSshHostKeys');
+
   // /InstallRoot=... accepted as an alias for /DIR=...
   InstallRootParam := Trim(ExpandConstant('{param:InstallRoot|}'));
   if InstallRootParam <> '' then
@@ -341,6 +369,11 @@ begin
   // over: without it the agent would re-register and the server would issue a new
   // token and SSH key on every update.
   ForceDirectories(DataRoot + '\logs');
+  // Чистая установка (агент не зарегистрирован): machine-id, оставшийся от
+  // эталонного ПК или прерванной установки, сбрасываем — иначе клоны образа
+  // получили бы один идентификатор, и сервер считал бы их одним хостом.
+  if not GUpgrade then
+    DeleteFile(DataRoot + '\machine-id');
   Config :=
     '{' +
     JsonPair('ServerUrl',       GServerUrl) +
@@ -372,8 +405,17 @@ begin
     '$dataRoot    = ''' + DataRoot + '''' + NL +
     '$serverUrl   = ' + PsLiteral(GServerUrl) + NL +
     '$sshSourceParam = ' + PsLiteral(GSshSource) + NL +
+    '$deferStart  = ' + PsBool(GDeferStart) + NL +
+    '$resetSshHostKeys = ' + PsBool(GResetSshHostKeys) + NL +
     '$sshdRestartNeeded = $false' + NL +
+    '# sshd.exe from the service registration: the capability build lives in System32,' + NL +
+    '# the MSI build used by the old install.ps1 in Program Files.' + NL +
+    'function Get-SshdExe {' + NL +
+    '    $svcPath = (Get-CimInstance Win32_Service -Filter "Name=''sshd''").PathName' + NL +
+    '    if ($svcPath -match ''^\s*"([^"]+)"'') { $Matches[1] } else { ($svcPath -replace ''\s+-.*$'', '''').Trim() }' + NL +
+    '}' + NL +
     'Log ''=== FleetManager Agent install script started ==''' + NL +
+    'Log (''Mode: '' + $(if (' + PsBool(GUpgrade) + ') { ''upgrade (registration kept)'' } else { ''fresh install (machine-id reset)'' }) + $(if ($deferStart) { '', service starts after reboot'' } else { '''' }))' + NL +
     '' + NL +
     '# OpenSSH Server on port 22, answering only the Fleet Manager server.' + NL +
     '# Non-fatal: the agent itself works even if this step fails.' + NL +
@@ -446,9 +488,8 @@ begin
     '        Copy-Item $sshdConfig "$sshdConfig.fleetmanager.bak" -Force' + NL +
     '        [System.IO.File]::WriteAllText($sshdConfig, $updated, $utf8)' + NL +
     '        try {' + NL +
-    '            $svcPath = (Get-CimInstance Win32_Service -Filter "Name=''sshd''").PathName' + NL +
-    '            $sshdExe = if ($svcPath -match ''^\s*"([^"]+)"'') { $Matches[1] } else { ($svcPath -replace ''\s+-.*$'', '''').Trim() }' + NL +
-    '            if (-not $sshdExe -or -not (Test-Path $sshdExe)) { throw "sshd.exe not found (service path: $svcPath)" }' + NL +
+    '            $sshdExe = Get-SshdExe' + NL +
+    '            if (-not $sshdExe -or -not (Test-Path $sshdExe)) { throw "sshd.exe not found (service path: $sshdExe)" }' + NL +
     '            $ErrorActionPreference = ''Continue''' + NL +
     '            $check = & $sshdExe -t -f $sshdConfig 2>&1 | Out-String' + NL +
     '            $checkCode = $LASTEXITCODE' + NL +
@@ -503,10 +544,17 @@ begin
     '        Start-Sleep -Milliseconds 500' + NL +
     '    }' + NL +
     '    Log "Creating service: $serviceExe"' + NL +
-    '    & sc.exe create FleetManagerAgent binPath= "`"$serviceExe`"" start= auto obj= LocalSystem DisplayName= "FleetManager Agent" | Out-Null' + NL +
+    '    # /DeferStart: delayed auto-start (the network is up by then) and no start now -' + NL +
+    '    # the agent must register after the reboot that applies the new computer name.' + NL +
+    '    $startType = if ($deferStart) { ''delayed-auto'' } else { ''auto'' }' + NL +
+    '    & sc.exe create FleetManagerAgent binPath= "`"$serviceExe`"" start= $startType obj= LocalSystem DisplayName= "FleetManager Agent" | Out-Null' + NL +
     '    & sc.exe description FleetManagerAgent "Fleet Manager inventory and heartbeat agent" | Out-Null' + NL +
-    '    & sc.exe start FleetManagerAgent | Out-Null' + NL +
-    '    Log ''Service created and started''' + NL +
+    '    if ($deferStart) {' + NL +
+    '        Log ''Service created; it starts after the next reboot (/DeferStart)''' + NL +
+    '    } else {' + NL +
+    '        & sc.exe start FleetManagerAgent | Out-Null' + NL +
+    '        Log ''Service created and started''' + NL +
+    '    }' + NL +
     '} catch {' + NL +
     '    Log "Service FAILED: $_"' + NL +
     '    throw' + NL +
@@ -532,12 +580,46 @@ begin
     '# was tried first but rejects NUL (relative NUL 404s; \\.\NUL collides because' + NL +
     '# stdout/stderr can''t redirect to the same resolved path) — cmd /c start sidesteps' + NL +
     '# all of that by detaching the child the same way any other backgrounded cmd job does.' + NL +
-    'try {' + NL +
-    '    Start-Process -FilePath ''cmd.exe'' -WorkingDirectory $installRoot -WindowStyle Hidden ' +
+    'if ($deferStart) {' + NL +
+    '    Log ''Tray not launched (/DeferStart): it starts at the next logon''' + NL +
+    '} else {' + NL +
+    '    try {' + NL +
+    '        Start-Process -FilePath ''cmd.exe'' -WorkingDirectory $installRoot -WindowStyle Hidden ' +
              '-ArgumentList "/c start `"`" /B `"$trayExe`""' + NL +
-    '    Log ''Tray launched''' + NL +
-    '} catch {' + NL +
-    '    Log "Tray launch warning (starts at next logon): $_"' + NL +
+    '        Log ''Tray launched''' + NL +
+    '    } catch {' + NL +
+    '        Log "Tray launch warning (starts at next logon): $_"' + NL +
+    '    }' + NL +
+    '}' + NL +
+    '' + NL +
+    '# /ResetSshHostKeys: a PC deployed from an image carries the reference machine''s' + NL +
+    '# SSH host keys if sshd ever ran there, so every clone would present the same' + NL +
+    '# identity. Delete them and let sshd generate this PC''s own at start. Refused' + NL +
+    '# inside an SSH session: new connections would fail until sshd restarts.' + NL +
+    'if ($resetSshHostKeys) {' + NL +
+    '    try {' + NL +
+    '        if ($env:SSH_CONNECTION -or $env:SSH_CLIENT) { throw ''refused inside an SSH session'' }' + NL +
+    '        if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) { throw ''sshd service not found'' }' + NL +
+    '        $sshDir = Join-Path $env:ProgramData ''ssh''' + NL +
+    '        Stop-Service sshd -Force' + NL +
+    '        Get-ChildItem -Path $sshDir -Filter ''ssh_host_*'' -File -ErrorAction SilentlyContinue | Remove-Item -Force' + NL +
+    '        Start-Service sshd' + NL +
+    '        $sshdRestartNeeded = $false' + NL +
+    '        Start-Sleep -Seconds 2' + NL +
+    '        if (-not (Get-ChildItem -Path $sshDir -Filter ''ssh_host_*_key'' -File -ErrorAction SilentlyContinue)) {' + NL +
+    '            # Fallback for OpenSSH builds that do not create missing keys at start.' + NL +
+    '            & (Join-Path (Split-Path -Parent (Get-SshdExe)) ''ssh-keygen.exe'') -A' + NL +
+    '            if ($LASTEXITCODE -ne 0) { throw "ssh-keygen -A exit code $LASTEXITCODE" }' + NL +
+    '            Get-ChildItem -Path $sshDir -Filter ''ssh_host_*_key'' -File | ForEach-Object { & icacls.exe $_.FullName /inheritance:r /grant ''*S-1-5-18:F'' /grant ''*S-1-5-32-544:F'' | Out-Null }' + NL +
+    '            Restart-Service sshd -Force' + NL +
+    '        }' + NL +
+    '        $keys = @(Get-ChildItem -Path $sshDir -Filter ''ssh_host_*_key'' -File -ErrorAction SilentlyContinue)' + NL +
+    '        if (-not $keys) { throw ''sshd did not generate new host keys'' }' + NL +
+    '        Log "SSH host keys regenerated ($($keys.Count))"' + NL +
+    '    } catch {' + NL +
+    '        Log "SSH host key reset warning: $_"' + NL +
+    '        Start-Service sshd -ErrorAction SilentlyContinue' + NL +
+    '    }' + NL +
     '}' + NL +
     '' + NL +
     '# sshd reads sshd_config only when it starts. A remote update runs this very' + NL +

@@ -45,6 +45,26 @@ sshd is restarted at the end of the install; when the installer runs inside an
 SSH session (a remote update), the restart is deferred by two minutes through a
 self-removing scheduled task so the update's own session is not cut.
 
+## Provisioning a PC deployed from an image
+
+AutoDomain installs the agent right after the domain join, before the reboot
+that applies the new computer name:
+
+```powershell
+FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=https://fleet.example /EnrollmentToken='<raw-token>' /SshLogin='DOMAIN\user' /DeferStart=1 /ResetSshHostKeys=1
+```
+
+- `/DeferStart=1` creates the service with delayed auto-start but does not
+  start it (nor the tray), so the agent registers after the reboot, under the
+  new name.
+- `/ResetSshHostKeys=1` deletes the SSH host keys inherited from the reference
+  machine; sshd generates this PC's own. Refused inside an SSH session.
+- A fresh install (no `AgentToken` in `agent.json`) always drops a leftover
+  `machine-id`, so clones of one image never share it.
+
+The service itself also waits with registration while a computer rename is
+pending a reboot, and retries a missing registration every minute.
+
 The installer writes the token to `%ProgramData%\FleetManagerAgent\agent.json`, registers the service, quotes the tray path in the HKLM Run key, and starts the tray in the interactive user's Explorer context. If the current session has no Explorer process, the tray starts after the next logon.
 
 After registration the service installs the server-generated public SSH key in `C:\ProgramData\ssh\administrators_authorized_keys`. The matching private key is kept by Fleet Manager in the encrypted Key Store. The service retries this installation on every synchronization and reports `icacls.exe` errors instead of silently continuing, so Ansible cannot start using a key that was never accepted by Windows OpenSSH. `uninstall.ps1` stops both the service and the tray process, calls the server cleanup endpoint, removes the local authorized key, and then deletes the service and local data. If the server/API cleanup fails, the script exits with the HTTP error and keeps the configuration so the operation can be retried. For an intentional local-only removal, run `.\uninstall.ps1 -SkipRemoteCleanup` from an elevated PowerShell session.
