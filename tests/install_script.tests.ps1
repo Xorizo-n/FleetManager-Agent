@@ -85,6 +85,31 @@ if ($options -notmatch 'public string\? SshSourceAddress') {
     throw 'AgentOptions must keep SshSourceAddress, or the service drops it when it rewrites agent.json.'
 }
 
+# Подготовка ПК из образа (AutoDomain): агент ставится до перезагрузки, которая
+# применяет новое имя, и должен зарегистрироваться только после неё.
+if (-not $iss.Contains('ParamFlag(''DeferStart'')') -or -not $iss.Contains('ParamFlag(''ResetSshHostKeys'')')) {
+    throw 'Installer must accept /DeferStart and /ResetSshHostKeys.'
+}
+if ($iss -notmatch 'if \(\$deferStart\) \{ ''''delayed-auto'''' \}' -or
+    $iss -notmatch 'if \(\$deferStart\) \{[^}]*starts after the next reboot[^}]*\} else \{\s*''\s*\+\s*NL\s*\+\s*''\s*& sc\.exe start FleetManagerAgent') {
+    throw '/DeferStart must create the service with delayed auto-start and must not start it now.'
+}
+if ($iss -notmatch 'if \(\$deferStart\) \{\s*''\s*\+\s*NL\s*\+\s*''\s*Log ''''Tray not launched') {
+    throw '/DeferStart must not launch the tray either.'
+}
+# Клоны образа не должны делить machine-id: сервер находит хост прежде всего по нему.
+if ($iss -notmatch 'if not GUpgrade then\s+DeleteFile\(DataRoot \+ ''\\machine-id''\)') {
+    throw 'A fresh install (no AgentToken) must drop a leftover machine-id.'
+}
+$resetBlock = [regex]::Match($iss, 'if \(\$resetSshHostKeys\) \{[\s\S]*?Log "SSH host key reset warning').Value
+if (-not $resetBlock -or $resetBlock -notmatch 'SSH_CONNECTION[\s\S]*throw' -or -not $resetBlock.Contains('ssh_host_*') -or -not $resetBlock.Contains('ssh-keygen.exe')) {
+    throw '/ResetSshHostKeys must refuse inside an SSH session, delete ssh_host_* and fall back to ssh-keygen -A.'
+}
+$worker = Get-Content (Join-Path $PSScriptRoot '..\src\FleetManager.Agent.Service\AgentWorker.cs') -Raw
+if ($worker -notmatch 'ComputerRename\.IsPending\(\)[\s\S]{0,400}return false') {
+    throw 'The agent must not register while a computer rename is pending a reboot.'
+}
+
 # Файлы [Files] копируются Inno Setup на шаге ssInstall, до ssPostInstall — если
 # служба останавливается только в ssPostInstall, in-place обновление падает с
 # "fatal error during installation" (exit code 5), потому что сама служба ещё

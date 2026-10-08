@@ -9,6 +9,7 @@ public sealed class AgentWorker : BackgroundService
     private readonly AgentLogger _logger;
     private readonly IInventoryCollector _inventory;
     private AgentOptions _options;
+    private bool _renameWaitLogged;
 
     public AgentWorker(AgentState state, AgentLogger logger, IInventoryCollector inventory)
     {
@@ -26,11 +27,11 @@ public sealed class AgentWorker : BackgroundService
 
         var pipeTask = RunPipeAsync(stoppingToken);
         await SyncOnceAsync(stoppingToken);
-        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(Math.Clamp(_options.SyncIntervalMinutes, 1, 1440)));
         try
         {
-            while (await timer.WaitForNextTickAsync(stoppingToken))
+            while (!stoppingToken.IsCancellationRequested)
             {
+                await Task.Delay(SyncSchedule.NextDelay(_options), stoppingToken);
                 await SyncOnceAsync(stoppingToken);
             }
         }
@@ -56,13 +57,18 @@ public sealed class AgentWorker : BackgroundService
         try
         {
             _options = AgentOptions.Load(_state.DataDirectory);
+            using var client = string.IsNullOrWhiteSpace(_options.ServerUrl)
+                ? null
+                : new HttpClient { BaseAddress = new Uri(AgentConfiguration.NormalizeServerUrl(_options.ServerUrl) + "/") };
+            var api = client is null ? null : new FleetManagerApiClient(client, _logger);
+            // Registration first: until it succeeds there is nowhere to send the inventory,
+            // and collecting it on every one-minute retry would only load the PC.
+            if (api is not null && !await EnsureRegistrationAsync(api, cancellationToken)) return;
+
             var hardware = await _inventory.CollectHardwareAsync(cancellationToken);
             var software = await _inventory.CollectSoftwareAsync(cancellationToken);
-            if (!string.IsNullOrWhiteSpace(_options.ServerUrl))
+            if (api is not null)
             {
-                using var client = new HttpClient { BaseAddress = new Uri(AgentConfiguration.NormalizeServerUrl(_options.ServerUrl) + "/") };
-                var api = new FleetManagerApiClient(client, _logger);
-                await EnsureRegistrationAsync(api, cancellationToken);
                 EnsureSshKeyInstalled();
                 var snapshot = new AgentSnapshot(_state.Status, hardware, software);
                 await api.SendHeartbeatAsync(snapshot, _options.AgentToken, _options.SshLogin, cancellationToken);
@@ -87,11 +93,23 @@ public sealed class AgentWorker : BackgroundService
         }
     }
 
-    private async Task EnsureRegistrationAsync(FleetManagerApiClient api, CancellationToken cancellationToken)
+    /// <summary>Registers the agent if needed; false while registration has to wait.</summary>
+    private async Task<bool> EnsureRegistrationAsync(FleetManagerApiClient api, CancellationToken cancellationToken)
     {
-        if (!string.IsNullOrWhiteSpace(_options.AgentToken)) return;
+        if (!string.IsNullOrWhiteSpace(_options.AgentToken)) return true;
         if (string.IsNullOrWhiteSpace(_options.EnrollmentToken))
             throw new InvalidOperationException("Enrollment token is not configured.");
+        // The host is registered under Environment.MachineName. Right after a rename (e.g. the
+        // AutoDomain domain join) that is still the old name until the reboot, so wait for it.
+        if (ComputerRename.IsPending())
+        {
+            if (!_renameWaitLogged)
+            {
+                _logger.Info("Computer rename is pending a reboot; registration waits until the new name is active.");
+                _renameWaitLogged = true;
+            }
+            return false;
+        }
         var registration = await api.RegisterAsync(
             _options.EnrollmentToken,
             MachineIdentity.GetOrCreate(_state.DataDirectory),
@@ -110,6 +128,7 @@ public sealed class AgentWorker : BackgroundService
         _options.EnrollmentToken = null;
         _options.Save(_state.DataDirectory);
         _logger.Info($"Agent registered as host {registration.HostId}.");
+        return true;
     }
 
     private void EnsureSshKeyInstalled()
