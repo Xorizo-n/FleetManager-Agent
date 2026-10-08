@@ -19,15 +19,31 @@ when the EXE runs. Build it with `build-installer.ps1`.
 
 ## SSH port policy
 
-By default the installer configures sshd to listen **only on port 5022** (the
-Ansible management port) and removes any pre-existing inbound firewall rule
-that allows port 22 — including the rule the OpenSSH Server Windows capability
-creates for itself. Pass `/AllowPort22=1` to skip that check and leave
-whatever port-22 firewall state already exists on the host untouched:
+sshd listens on **port 22** and answers only the Fleet Manager server:
+
+- the `FleetManager-Agent-SSH` firewall rule allows TCP 22 from the server's
+  address only;
+- every other enabled inbound allow rule for port 22 or `sshd.exe` (such as
+  `OpenSSH-Server-In-TCP`, open to everyone) is disabled — Windows admits a
+  connection if any allow rule matches, so leaving one would void the
+  restriction;
+- `sshd_config` gets a `Match Address *,!<server>` block with `DenyUsers *`,
+  which still applies where Group Policy overrides local firewall rules;
+- sshd moved to port 5022 by earlier installer builds is moved back to 22;
+- PowerShell becomes the OpenSSH default shell (the server uses
+  `ansible_shell_type=powershell`).
+
+The server's address is taken from the `ServerUrl` host. Pass a comma-separated
+IPv4/CIDR list to override it or to admit an admin subnet as well; the value is
+kept in `agent.json` for later upgrades:
 
 ```powershell
-FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=https://fleet.example /EnrollmentToken='<raw-token>' /AllowPort22=1
+FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=https://fleet.example /EnrollmentToken='<raw-token>' /SshSourceAddress=10.40.240.154,10.40.0.0/24
 ```
+
+sshd is restarted at the end of the install; when the installer runs inside an
+SSH session (a remote update), the restart is deferred by two minutes through a
+self-removing scheduled task so the update's own session is not cut.
 
 The installer writes the token to `%ProgramData%\FleetManagerAgent\agent.json`, registers the service, quotes the tray path in the HKLM Run key, and starts the tray in the interactive user's Explorer context. If the current session has no Explorer process, the tray starts after the next logon.
 

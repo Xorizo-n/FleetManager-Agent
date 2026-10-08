@@ -10,6 +10,9 @@ public sealed class AgentOptions
     public string? AgentToken { get; set; }
     public string? SshPublicKey { get; set; }
     public string? SshLogin { get; set; }
+    // Откуда разрешён SSH (IPv4/CIDR через запятую). Использует только установщик,
+    // но служба перезаписывает agent.json целиком — без свойства значение терялось бы.
+    public string? SshSourceAddress { get; set; }
     public int SyncIntervalMinutes { get; set; } = 5;
 
     public static AgentOptions Load(string? dataDirectory = null)

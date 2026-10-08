@@ -50,6 +50,29 @@ public sealed class AgentConfigurationTests
     }
 
     [Fact]
+    public void AgentOptions_keepsInstallerWrittenSshSourceAddressAcrossServiceRewrite()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "fleet-manager-agent-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(directory);
+            // Установщик пишет PascalCase, служба читает и перезаписывает файл camelCase.
+            File.WriteAllText(
+                AgentConfiguration.ConfigurationFile(directory),
+                "{\"ServerUrl\":\"http://10.40.240.154:8080\",\"SshSourceAddress\":\"10.40.240.154,10.40.0.0/24\",\"SyncIntervalMinutes\":5}");
+
+            AgentOptions.Load(directory).Save(directory);
+
+            Assert.Equal("10.40.240.154,10.40.0.0/24", AgentOptions.Load(directory).SshSourceAddress);
+            Assert.Contains("\"sshSourceAddress\"", File.ReadAllText(AgentConfiguration.ConfigurationFile(directory)));
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void NormalizeServerUrl_rejects_non_http_urls()
     {
         Assert.Throws<ArgumentException>(() => AgentConfiguration.NormalizeServerUrl("ftp://fleet.example"));
