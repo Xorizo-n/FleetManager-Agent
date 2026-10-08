@@ -6,7 +6,7 @@
 ; Silent install:
 ;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=abc123
 ;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://... /EnrollmentToken=... /SshLogin=DOMAIN\user /DIR="C:\Custom\Path"
-;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://... /EnrollmentToken=... /AllowPort22=1
+;   FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://... /EnrollmentToken=... /SshSourceAddress=10.40.240.154,10.40.0.0/24
 ;
 ; Silent upgrade over an existing installation (this is what the server runs
 ; remotely — see FleetManager-Server, services/agent_update.py):
@@ -15,10 +15,12 @@
 ; token and SSH key are read from the existing agent.json and written back, so
 ; the agent keeps its registration instead of enrolling again.
 ;
-; By default only port 5022 (the Ansible management port) is opened; sshd is
-; configured to listen solely on 5022 and any pre-existing inbound firewall
-; rule that allows port 22 is detected and removed. Pass /AllowPort22=1 to
-; skip that check and leave whatever port-22 firewall state already exists.
+; SSH (Ansible management channel) listens on port 22 and answers only the
+; Fleet Manager server: one firewall rule allows TCP 22 from the source address
+; only, every other inbound allow rule for port 22 / sshd.exe is disabled, and
+; sshd_config denies logins from any other address. The source is
+; /SshSourceAddress (IPv4 or CIDR, comma-separated), else the value kept in
+; agent.json, else the address(es) of the ServerUrl host.
 ;
 ; Silent uninstall (includes remote server cleanup):
 ;   "%ProgramFiles%\FleetManager Agent\unins000.exe" /VERYSILENT
@@ -87,6 +89,16 @@ begin
   end;
 end;
 
+// Single-quoted PowerShell string literal.
+function PsLiteral(const S: string): string;
+var
+  Escaped: string;
+begin
+  Escaped := S;
+  StringChangeEx(Escaped, '''', '''''', True);
+  Result := '''' + Escaped + '''';
+end;
+
 // Write a self-contained PowerShell script to a temp file and execute it.
 // Using -File avoids the quoting and length limits of -Command "...".
 procedure RunPowerShellScript(const Script: string);
@@ -106,7 +118,7 @@ var
   GServerUrl:       string;
   GEnrollmentToken: string;
   GSshLogin:        string;
-  GAllowPort22:     Boolean;
+  GSshSource:       string;   // откуда разрешён SSH; пусто — адрес хоста из ServerUrl
   GExistingConfig:  string;   // agent.json предыдущей установки (пусто при первой установке)
   GUpgrade:         Boolean;  // поверх уже зарегистрированного агента
 
@@ -207,7 +219,7 @@ end;
 
 function InitializeSetup(): Boolean;
 var
-  InstallRootParam, AllowPort22Param: string;
+  InstallRootParam: string;
 begin
   GServerUrl        := Trim(ExpandConstant('{param:ServerUrl|}'));
   GEnrollmentToken  := Trim(ExpandConstant('{param:EnrollmentToken|}'));
@@ -222,10 +234,13 @@ begin
     GServerUrl := Trim(JsonString(GExistingConfig, 'ServerUrl'));
   GUpgrade := (Trim(JsonString(GExistingConfig, 'AgentToken')) <> '') and (GServerUrl <> '');
 
-  // /AllowPort22=1 skips the default port-22 firewall check/close step.
-  AllowPort22Param := Trim(ExpandConstant('{param:AllowPort22|}'));
-  GAllowPort22 := (AllowPort22Param <> '') and (CompareText(AllowPort22Param, '0') <> 0)
-    and (CompareText(AllowPort22Param, 'false') <> 0);
+  // /SshSourceAddress=... — с каких адресов разрешён SSH (IPv4 или CIDR через
+  // запятую). Без параметра берётся значение прошлой установки (его же писал
+  // старый install.ps1), а если нет и его — скрипт установки разрешит адрес
+  // хоста из ServerUrl.
+  GSshSource := Trim(ExpandConstant('{param:SshSourceAddress|}'));
+  if GSshSource = '' then
+    GSshSource := Trim(JsonString(GExistingConfig, 'SshSourceAddress'));
 
   // /InstallRoot=... accepted as an alias for /DIR=...
   InstallRootParam := Trim(ExpandConstant('{param:InstallRoot|}'));
@@ -262,7 +277,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   InstallRoot, DataRoot, ServiceExe, TrayExe: string;
-  Config, Script, AllowPort22Literal: string;
+  Config, Script: string;
   UserDomain, UserName, ComputerName: string;
 begin
   if CurStep = ssInstall then
@@ -321,8 +336,6 @@ begin
       GSshLogin := UserName;
   end;
 
-  if GAllowPort22 then AllowPort22Literal := 'true' else AllowPort22Literal := 'false';
-
   // Write agent.json (must happen before the PowerShell script so logs dir exists).
   // On an upgrade the registration (AgentId/AgentToken/SshPublicKey) is carried
   // over: without it the agent would re-register and the server would issue a new
@@ -336,6 +349,7 @@ begin
     JsonPair('AgentToken',      JsonString(GExistingConfig, 'AgentToken')) +
     JsonPair('SshPublicKey',    JsonString(GExistingConfig, 'SshPublicKey')) +
     JsonPair('SshLogin',        GSshLogin) +
+    JsonPair('SshSourceAddress', GSshSource) +
     '"SyncIntervalMinutes":' + IntToStr(JsonInteger(GExistingConfig, 'SyncIntervalMinutes', 5)) +
     '}';
   SaveStringToFile(DataRoot + '\agent.json', Config, False);
@@ -355,58 +369,127 @@ begin
     '$serviceExe  = ''' + ServiceExe + '''' + NL +
     '$trayExe     = ''' + TrayExe + '''' + NL +
     '$installRoot = ''' + InstallRoot + '''' + NL +
-    '$allowPort22 = $' + AllowPort22Literal + NL +
+    '$dataRoot    = ''' + DataRoot + '''' + NL +
+    '$serverUrl   = ' + PsLiteral(GServerUrl) + NL +
+    '$sshSourceParam = ' + PsLiteral(GSshSource) + NL +
+    '$sshdRestartNeeded = $false' + NL +
     'Log ''=== FleetManager Agent install script started ==''' + NL +
     '' + NL +
-    '# OpenSSH Server — non-fatal: agent works even if this step is skipped' + NL +
+    '# OpenSSH Server on port 22, answering only the Fleet Manager server.' + NL +
+    '# Non-fatal: the agent itself works even if this step fails.' + NL +
     'try {' + NL +
-    '    $s = Get-WindowsCapability -Online -Name OpenSSH.Server*' + NL +
-    '    if ($s.State -ne ''Installed'') {' + NL +
+    '    # Allowed source: /SshSourceAddress (or agent.json), else the ServerUrl host.' + NL +
+    '    # Nothing is touched when it cannot be determined: better unmanaged than' + NL +
+    '    # SSH open to everyone.' + NL +
+    '    $sshSource = @($sshSourceParam -split '','' | ForEach-Object { $_.Trim() } | Where-Object { $_ })' + NL +
+    '    if (-not $sshSource) {' + NL +
+    '        $serverHost = ([Uri]$serverUrl).Host' + NL +
+    '        $parsed = $null' + NL +
+    '        if ([System.Net.IPAddress]::TryParse($serverHost, [ref]$parsed)) {' + NL +
+    '            $sshSource = @($parsed.IPAddressToString)' + NL +
+    '        } else {' + NL +
+    '            $sshSource = @([System.Net.Dns]::GetHostAddresses($serverHost) | Where-Object { $_.AddressFamily -eq ''InterNetwork'' } | ForEach-Object { $_.IPAddressToString })' + NL +
+    '        }' + NL +
+    '    }' + NL +
+    '    if (-not $sshSource) { throw "cannot determine the SSH source address from $serverUrl - pass /SshSourceAddress=" }' + NL +
+    '    foreach ($entry in $sshSource) {' + NL +
+    '        $parts = $entry.Split(''/'', 2); $ip = $null; $prefix = 32' + NL +
+    '        $valid = [System.Net.IPAddress]::TryParse($parts[0], [ref]$ip) -and $ip.AddressFamily -eq ''InterNetwork''' + NL +
+    '        if ($valid -and $parts.Count -eq 2) { $valid = [int]::TryParse($parts[1], [ref]$prefix) -and $prefix -ge 0 -and $prefix -le 32 }' + NL +
+    '        if (-not $valid) { throw "invalid SSH source address: $entry (expected IPv4 or IPv4/CIDR)" }' + NL +
+    '    }' + NL +
+    '    Log "SSH source restricted to: $($sshSource -join '', '')"' + NL +
+    '' + NL +
+    '    # Hosts set up by the old install.ps1 run the Win32-OpenSSH MSI build;' + NL +
+    '    # adding the Windows capability on top of it would register a second sshd.' + NL +
+    '    if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {' + NL +
     '        Log ''Installing OpenSSH Server...''' + NL +
     '        Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null' + NL +
     '    }' + NL +
-    '    # sshd listens ONLY on the Ansible management port 5022 by default.' + NL +
-    '    # The rewrite+restart is skipped when sshd already listens on 5022 only:' + NL +
-    '    # a remote update runs over that very SSH session, and restarting sshd' + NL +
-    '    # would drop it before the installer reports its result.' + NL +
-    '    $sshdConfig = ''C:\ProgramData\ssh\sshd_config''' + NL +
-    '    $sshdNeedsUpdate = $true' + NL +
-    '    if (Test-Path $sshdConfig) {' + NL +
-    '        $ports = @(@(Get-Content $sshdConfig) | Where-Object { $_ -match ''^\s*Port\s+\d+\s*$'' })' + NL +
-    '        if (($ports.Count -eq 1) -and ($ports[0] -match ''^\s*Port\s+5022\s*$'')) { $sshdNeedsUpdate = $false }' + NL +
-    '    }' + NL +
-    '    if ($sshdNeedsUpdate) {' + NL +
-    '        if (Test-Path $sshdConfig) {' + NL +
-    '            $lines = @(Get-Content $sshdConfig) | Where-Object { $_ -notmatch ''^\s*Port\s+\d+\s*$'' }' + NL +
-    '            Set-Content $sshdConfig -Value (@(''Port 5022'') + $lines)' + NL +
-    '        } else {' + NL +
-    '            Set-Content $sshdConfig ''Port 5022''' + NL +
-    '        }' + NL +
-    '        Restart-Service sshd -Force -ErrorAction SilentlyContinue' + NL +
-    '        Log ''sshd reconfigured for port 5022''' + NL +
-    '    } else {' + NL +
-    '        Log ''sshd already listens on 5022 only; restart skipped''' + NL +
-    '    }' + NL +
     '    Set-Service -Name sshd -StartupType Automatic' + NL +
-    '    # Firewall: Ansible SSH port 5022 — the only SSH port opened by default' + NL +
-    '    if (-not (Get-NetFirewallRule -Name FleetManager-Agent-SSH-5022 -ErrorAction SilentlyContinue)) {' + NL +
-    '        New-NetFirewallRule -Name FleetManager-Agent-SSH-5022 -DisplayName ''FleetManager Agent SSH (5022)'' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 5022 | Out-Null' + NL +
+    '    # The first start generates sshd_config and the host keys.' + NL +
+    '    if ((Get-Service sshd).Status -ne ''Running'') { Start-Service sshd }' + NL +
+    '    $sshdConfig = Join-Path $env:ProgramData ''ssh\sshd_config''' + NL +
+    '    for ($i = 0; ($i -lt 20) -and -not (Test-Path $sshdConfig); $i++) { Start-Sleep -Milliseconds 500 }' + NL +
+    '    if (-not (Test-Path $sshdConfig)) { throw "sshd_config not found: $sshdConfig" }' + NL +
+    '' + NL +
+    '    # PowerShell as the SSH default shell: the server drives hosts with' + NL +
+    '    # ansible_shell_type=powershell (raw module); under cmd.exe every command fails.' + NL +
+    '    if (-not (Test-Path ''HKLM:\SOFTWARE\OpenSSH'')) { New-Item -Path ''HKLM:\SOFTWARE\OpenSSH'' | Out-Null }' + NL +
+    '    Set-ItemProperty -Path ''HKLM:\SOFTWARE\OpenSSH'' -Name DefaultShell -Value "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"' + NL +
+    '    Set-ItemProperty -Path ''HKLM:\SOFTWARE\OpenSSH'' -Name DefaultShellCommandOption -Value ''-c''' + NL +
+    '' + NL +
+    '    # sshd_config: port 22 only (older builds of this installer moved it to' + NL +
+    '    # 5022), and logins from anywhere but $sshSource are denied - this holds' + NL +
+    '    # even where Group Policy overrides the local firewall rules below.' + NL +
+    '    $original = [System.IO.File]::ReadAllText($sshdConfig)' + NL +
+    '    $lines = @($original -split "`r?`n")' + NL +
+    '    if (@($lines | Where-Object { $_ -match ''^\s*Port\s+\d+\s*$'' -and $_ -notmatch ''^\s*Port\s+22\s*$'' }).Count -gt 0) {' + NL +
+    '        $lines = @(''Port 22'') + @($lines | Where-Object { $_ -notmatch ''^\s*Port\s+\d+\s*$'' })' + NL +
+    '        Log ''sshd: port moved to 22''' + NL +
     '    }' + NL +
-    '    # Port 22: closed by default (removes any pre-existing allow rule, incl.' + NL +
-    '    # the OpenSSH capability''s own default rule). Skippable with /AllowPort22=1.' + NL +
-    '    if ($allowPort22) {' + NL +
-    '        Log ''Port 22 check skipped (/AllowPort22)''' + NL +
-    '    } else {' + NL +
-    '        $port22Rules = @(Get-NetFirewallRule -Direction Inbound -Action Allow -ErrorAction SilentlyContinue |' + NL +
-    '            Where-Object { $_.Enabled -eq ''True'' -and (($_ | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue).LocalPort -contains ''22'') })' + NL +
-    '        if ($port22Rules) {' + NL +
-    '            $port22Rules | Remove-NetFirewallRule -ErrorAction SilentlyContinue' + NL +
-    '            Log "Port 22 closed ($($port22Rules.Count) firewall rule(s) removed)"' + NL +
-    '        } else {' + NL +
-    '            Log ''Port 22 already closed''' + NL +
+    '    $begin = ''# BEGIN FleetManager SSH source restriction''' + NL +
+    '    $end = ''# END FleetManager SSH source restriction''' + NL +
+    '    $kept = New-Object System.Collections.Generic.List[string]' + NL +
+    '    $inside = $false' + NL +
+    '    foreach ($line in $lines) {' + NL +
+    '        if ($line.Trim() -eq $begin) { $inside = $true; continue }' + NL +
+    '        if ($line.Trim() -eq $end) { $inside = $false; continue }' + NL +
+    '        if (-not $inside) { $kept.Add($line) }' + NL +
+    '    }' + NL +
+    '    while (($kept.Count -gt 0) -and [string]::IsNullOrWhiteSpace($kept[$kept.Count - 1])) { $kept.RemoveAt($kept.Count - 1) }' + NL +
+    '    $matchList = (@(''*'') + @($sshSource | ForEach-Object { "!$_" })) -join '',''' + NL +
+    '    foreach ($line in @('''', $begin, "Match Address $matchList", ''    DenyUsers *'', $end)) { $kept.Add($line) }' + NL +
+    '    $updated = ($kept -join "`r`n") + "`r`n"' + NL +
+    '    if ($updated -ne $original) {' + NL +
+    '        $utf8 = New-Object System.Text.UTF8Encoding($false)' + NL +
+    '        Copy-Item $sshdConfig "$sshdConfig.fleetmanager.bak" -Force' + NL +
+    '        [System.IO.File]::WriteAllText($sshdConfig, $updated, $utf8)' + NL +
+    '        try {' + NL +
+    '            $svcPath = (Get-CimInstance Win32_Service -Filter "Name=''sshd''").PathName' + NL +
+    '            $sshdExe = if ($svcPath -match ''^\s*"([^"]+)"'') { $Matches[1] } else { ($svcPath -replace ''\s+-.*$'', '''').Trim() }' + NL +
+    '            if (-not $sshdExe -or -not (Test-Path $sshdExe)) { throw "sshd.exe not found (service path: $svcPath)" }' + NL +
+    '            $ErrorActionPreference = ''Continue''' + NL +
+    '            $check = & $sshdExe -t -f $sshdConfig 2>&1 | Out-String' + NL +
+    '            $checkCode = $LASTEXITCODE' + NL +
+    '            $ErrorActionPreference = ''Stop''' + NL +
+    '            if ($checkCode -ne 0) { throw "sshd -t exit code $checkCode : $check" }' + NL +
+    '        } catch {' + NL +
+    '            $ErrorActionPreference = ''Stop''' + NL +
+    '            [System.IO.File]::WriteAllText($sshdConfig, $original, $utf8)' + NL +
+    '            throw "new sshd_config rejected, previous config restored: $_"' + NL +
     '        }' + NL +
+    '        $sshdRestartNeeded = $true' + NL +
+    '        Log ''sshd_config updated (sshd restarts at the end of the install)''' + NL +
+    '    } else {' + NL +
+    '        Log ''sshd_config already up to date''' + NL +
     '    }' + NL +
-    '    Log ''OpenSSH OK (port 5022)''' + NL +
+    '' + NL +
+    '    # Firewall: one allow rule for TCP 22 limited to $sshSource. Windows admits' + NL +
+    '    # a connection if ANY enabled allow rule matches, so every other inbound' + NL +
+    '    # allow rule for port 22 or sshd.exe (e.g. the OpenSSH-Server-In-TCP rule' + NL +
+    '    # open to everyone) is disabled - otherwise the restriction does nothing,' + NL +
+    '    # which is exactly what hosts set up by the old install.ps1 ended up with.' + NL +
+    '    $ruleName = ''FleetManager-Agent-SSH''' + NL +
+    '    $ruleTitle = ''FleetManager Agent SSH (22, Fleet Manager server only)''' + NL +
+    '    if (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue) {' + NL +
+    '        Set-NetFirewallRule -Name $ruleName -NewDisplayName $ruleTitle -Enabled True -Direction Inbound -Action Allow -Profile Any -Protocol TCP -LocalPort 22 -RemoteAddress $sshSource' + NL +
+    '    } else {' + NL +
+    '        New-NetFirewallRule -Name $ruleName -DisplayName $ruleTitle -Enabled True -Direction Inbound -Action Allow -Profile Any -Protocol TCP -LocalPort 22 -RemoteAddress $sshSource | Out-Null' + NL +
+    '    }' + NL +
+    '    Remove-NetFirewallRule -Name FleetManager-Agent-SSH-5022 -ErrorAction SilentlyContinue' + NL +
+    '    $byPort = @(Get-NetFirewallPortFilter -All | Where-Object { $_.Protocol -eq ''TCP'' -and @($_.LocalPort) -contains ''22'' } | Get-NetFirewallRule)' + NL +
+    '    $byProgram = @(Get-NetFirewallApplicationFilter -All | Where-Object { $_.Program -match ''\\sshd\.exe$'' } | Get-NetFirewallRule)' + NL +
+    '    $foreign = @(@($byPort) + @($byProgram) | Where-Object { $_ -and $_.Name -ne $ruleName -and $_.Direction -eq ''Inbound'' -and $_.Action -eq ''Allow'' -and $_.Enabled -eq ''True'' } | Sort-Object Name -Unique)' + NL +
+    '    foreach ($rule in $foreign) {' + NL +
+    '        Disable-NetFirewallRule -Name $rule.Name' + NL +
+    '        Log "Firewall rule disabled (let SSH in from anywhere): $($rule.Name) / $($rule.DisplayName)"' + NL +
+    '    }' + NL +
+    '    $gpoOpen = @(Get-NetFirewallRule -PolicyStore RSOP -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue | Where-Object { @(($_ | Get-NetFirewallPortFilter).LocalPort) -contains ''22'' })' + NL +
+    '    if ($gpoOpen) { Log "WARNING: Group Policy opens port 22 ($(@($gpoOpen | ForEach-Object { $_.DisplayName }) -join ''; '')); only the sshd_config restriction applies" }' + NL +
+    '    $ignoredOn = @(Get-NetFirewallProfile -PolicyStore ActiveStore | Where-Object { $_.Enabled -eq ''True'' -and $_.AllowLocalFirewallRules -eq ''False'' } | ForEach-Object { $_.Name })' + NL +
+    '    if ($ignoredOn) { Log "WARNING: Group Policy ignores local firewall rules on $($ignoredOn -join '', ''); inbound SSH follows the GPO, which needs: TCP 22 from $($sshSource -join '','')" }' + NL +
+    '    Log ''OpenSSH OK (port 22, restricted source)''' + NL +
     '} catch {' + NL +
     '    Log "OpenSSH warning (non-fatal): $_"' + NL +
     '}' + NL +
@@ -455,6 +538,29 @@ begin
     '    Log ''Tray launched''' + NL +
     '} catch {' + NL +
     '    Log "Tray launch warning (starts at next logon): $_"' + NL +
+    '}' + NL +
+    '' + NL +
+    '# sshd reads sshd_config only when it starts. A remote update runs this very' + NL +
+    '# script over an SSH session of that sshd, and restarting it there could kill' + NL +
+    '# the installer before it finishes, so inside an SSH session the restart is' + NL +
+    '# deferred to a one-shot scheduled task that removes itself.' + NL +
+    'if ($sshdRestartNeeded) {' + NL +
+    '    try {' + NL +
+    '        if ($env:SSH_CONNECTION -or $env:SSH_CLIENT) {' + NL +
+    '            $taskName = ''FleetManager-Agent-sshd-restart''' + NL +
+    '            $restartScript = Join-Path $dataRoot ''sshd-restart.ps1''' + NL +
+    '            Set-Content -Path $restartScript -Value "Restart-Service sshd -Force; Unregister-ScheduledTask -TaskName $taskName -Confirm:`$false; Remove-Item -LiteralPath `$PSCommandPath -Force"' + NL +
+    '            $action = New-ScheduledTaskAction -Execute ''powershell.exe'' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$restartScript`""' + NL +
+    '            $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2)' + NL +
+    '            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User ''SYSTEM'' -RunLevel Highest -Force | Out-Null' + NL +
+    '            Log ''sshd restart scheduled in 2 minutes (install runs inside an SSH session)''' + NL +
+    '        } else {' + NL +
+    '            Restart-Service sshd -Force' + NL +
+    '            Log ''sshd restarted''' + NL +
+    '        }' + NL +
+    '    } catch {' + NL +
+    '        Log "sshd restart warning (new config applies at the next sshd start): $_"' + NL +
+    '    }' + NL +
     '}' + NL +
     '' + NL +
     'Log ''=== Install script completed ==''' + NL;

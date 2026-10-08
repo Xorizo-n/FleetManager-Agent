@@ -30,27 +30,59 @@ if ($iss -notmatch '\{param:SshLogin\|\}') {
     throw 'Installer must allow configuring the SSH login.'
 }
 
-# Port policy: only 5022 opened by default, port 22 detected and closed unless
-# explicitly overridden via /AllowPort22.
-if (-not $iss.Contains('FleetManager-Agent-SSH-5022')) {
-    throw 'Installer must open the Ansible SSH port (5022).'
+# Политика SSH: порт 22, отвечает только серверу Fleet Manager. Все рабочие
+# хосты в проде доступны именно по 22 (правило брандмауэра с адресом сервера),
+# а 5022 не доходил ни до одного.
+$sshBlock = [regex]::Match($iss, '# OpenSSH Server on port 22[\s\S]*?# Windows service').Value
+if (-not $sshBlock) {
+    throw 'Installer must contain the OpenSSH block before the Windows service block.'
 }
-if ($iss.Contains('New-NetFirewallRule -Name OpenSSH-Server-In-TCP')) {
-    throw 'Installer must not unconditionally open port 22 by default.'
+if (-not $iss.Contains('{param:SshSourceAddress|}') -or $iss -notmatch "JsonPair\('SshSourceAddress',") {
+    throw 'Installer must accept /SshSourceAddress and keep it in agent.json for upgrades.'
 }
-if (-not $iss.Contains('{param:AllowPort22|}')) {
-    throw 'Installer must support an /AllowPort22 flag to skip closing port 22.'
+if (-not $sshBlock.Contains('([Uri]$serverUrl).Host')) {
+    throw 'Without /SshSourceAddress the allowed SSH source must default to the ServerUrl host.'
 }
-if (-not $iss.Contains('Remove-NetFirewallRule')) {
-    throw 'Installer must close any pre-existing port 22 firewall rule by default.'
+if ($sshBlock -notmatch 'New-NetFirewallRule -Name \$ruleName [^'']*-LocalPort 22 -RemoteAddress \$sshSource' -or
+    $sshBlock -notmatch 'Set-NetFirewallRule -Name \$ruleName [^'']*-LocalPort 22 -RemoteAddress \$sshSource') {
+    throw 'The FleetManager SSH firewall rule must allow TCP 22 only from the SSH source address.'
 }
-if (-not $iss.Contains("Set-Content `$sshdConfig ''Port 5022''")) {
-    throw 'Installer must configure sshd to listen on port 5022 only for a fresh sshd_config.'
+# Windows пропускает соединение, если совпало ЛЮБОЕ разрешающее правило: старый
+# install.ps1 добавлял правило с адресом сервера, но оставлял OpenSSH-Server-In-TCP
+# (открыт всем) — проверено с рабочей станции, порт 22 отвечал всем.
+if (-not $sshBlock.Contains('Disable-NetFirewallRule') -or -not $sshBlock.Contains('-contains ''''22''''')) {
+    throw 'Installer must disable every other inbound allow rule for port 22, otherwise the source restriction has no effect.'
 }
-# Удалённое обновление идёт по этой же SSH-сессии — перезапуск sshd на уже
-# настроенном хосте оборвал бы её до того, как установщик отчитается.
-if (-not $iss.Contains('$sshdNeedsUpdate')) {
-    throw 'Installer must skip the sshd rewrite/restart when sshd already listens on 5022 only.'
+if ($iss.Contains('New-NetFirewallRule -Name FleetManager-Agent-SSH-5022') -or $iss.Contains('{param:AllowPort22|}')) {
+    throw 'Port 5022 and /AllowPort22 are retired: SSH runs on 22 restricted to the server.'
+}
+if (-not $sshBlock.Contains('Match Address $matchList') -or -not $sshBlock.Contains('DenyUsers *')) {
+    throw 'sshd_config must deny logins from other addresses (holds even when GPO overrides local firewall rules).'
+}
+if (-not $sshBlock.Contains('-t -f $sshdConfig') -or -not $sshBlock.Contains('WriteAllText($sshdConfig, $original')) {
+    throw 'A rewritten sshd_config must be validated with sshd -t and restored if rejected.'
+}
+if (-not $sshBlock.Contains('DefaultShell') -or -not $sshBlock.Contains('WindowsPowerShell\v1.0\powershell.exe')) {
+    throw 'Installer must make PowerShell the OpenSSH default shell: the server uses ansible_shell_type=powershell.'
+}
+if ($sshBlock.Contains('Get-WindowsCapability') -or -not $sshBlock.Contains('if (-not (Get-Service sshd')) {
+    throw 'OpenSSH capability must be installed only when no sshd service exists (old hosts run the MSI build).'
+}
+# Удалённое обновление идёт по SSH-сессии этого же sshd — перезапуск посреди
+# установки мог бы убить установщик. Поэтому sshd перезапускается только в
+# конце, а внутри SSH-сессии — отложенно, через одноразовую задачу планировщика.
+if ($sshBlock.Contains('Restart-Service sshd')) {
+    throw 'sshd must not be restarted inside the OpenSSH block, only at the end of the install.'
+}
+if ($iss -notmatch 'if \(\$sshdRestartNeeded\)[\s\S]{0,300}SSH_CONNECTION[\s\S]{0,1500}Register-ScheduledTask[\s\S]{0,300}Restart-Service sshd -Force') {
+    throw 'Inside an SSH session the sshd restart must be deferred to a scheduled task.'
+}
+if ($iss -notmatch 'if \(\$sshdRestartNeeded\)[\s\S]*Install script completed') {
+    throw 'The sshd restart must run after the service and tray steps.'
+}
+$options = Get-Content (Join-Path $PSScriptRoot '..\src\FleetManager.Agent.Core\AgentOptions.cs') -Raw
+if ($options -notmatch 'public string\? SshSourceAddress') {
+    throw 'AgentOptions must keep SshSourceAddress, or the service drops it when it rewrites agent.json.'
 }
 
 # Файлы [Files] копируются Inno Setup на шаге ssInstall, до ssPostInstall — если

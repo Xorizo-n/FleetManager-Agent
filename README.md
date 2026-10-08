@@ -13,7 +13,7 @@ Windows-агент для Fleet Manager. Вариант 1 состоит из с
 - `src/FleetManager.Agent.Service` — фоновая служба: периодический сбор железа/ПО, heartbeat и обработка локальных команд.
 - `src/FleetManager.Agent.Tray` — неэле­вированный процесс в области уведомлений; открывает Control через `runas`.
 - `src/FleetManager.Agent.Control` — WinForms-панель с manifest `requireAdministrator`.
-- `installer` — `FleetManagerAgent.iss` (Inno Setup; единственный источник логики установки — OpenSSH Server, firewall, порт 5022, служба, автозапуск tray) и `uninstall.ps1` (ручное локальное удаление вне пакета).
+- `installer` — `FleetManagerAgent.iss` (Inno Setup; единственный источник логики установки — OpenSSH Server на порту 22 только для сервера, firewall, служба, автозапуск tray) и `uninstall.ps1` (ручное локальное удаление вне пакета).
 
 ## Сборка
 
@@ -53,11 +53,23 @@ FleetManagerAgent-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 
 Адрес сервера, идентификатор агента, agent-токен и SSH-ключ переносятся из существующего `%ProgramData%\FleetManagerAgent\agent.json`, поэтому агент остаётся зарегистрированным на том же хосте. Fleet Manager запускает эту же команду удалённо по SSH («Обновить агент» в реестре хостов), а версия из сборки уходит на сервер в heartbeat.
 
-По умолчанию открывается только порт **5022** (используется Ansible для управления хостом): sshd настраивается слушать исключительно его, а любое уже существующее разрешающее правило firewall для порта 22 обнаруживается и удаляется. Чтобы пропустить эту проверку и оставить состояние порта 22 как есть, добавьте `/AllowPort22=1`:
+### SSH: порт 22, только для сервера
+
+Ansible управляет хостом по SSH на порту **22**, и хост отвечает только серверу Fleet Manager:
+
+- правило брандмауэра `FleetManager-Agent-SSH` разрешает TCP 22 только с адреса сервера;
+- все остальные разрешающие входящие правила для порта 22 и `sshd.exe` (например, `OpenSSH-Server-In-TCP`, открытое всем) отключаются — иначе ограничение не действует, Windows пропускает соединение по любому подходящему правилу;
+- в `sshd_config` добавляется блок `Match Address *,!<адрес сервера>` с `DenyUsers *` — он ограничивает вход, даже если групповая политика отменяет локальные правила брандмауэра;
+- sshd с портом 5022 (ранние сборки установщика) переводится обратно на 22;
+- PowerShell назначается оболочкой SSH по умолчанию (сервер работает с `ansible_shell_type=powershell`).
+
+Адрес сервера определяется по хосту из `ServerUrl`. Если SSH идёт с другого адреса или нужно разрешить ещё и подсеть администраторов, передайте список IPv4/CIDR — он сохранится в `agent.json` и будет использоваться при обновлениях:
 
 ```powershell
-FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=your-token /AllowPort22=1
+FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=your-token /SshSourceAddress=10.40.240.154,10.40.0.0/24
 ```
+
+Перезапуск sshd выполняется в конце установки; при удалённом обновлении (установщик запущен внутри SSH-сессии) он откладывается на 2 минуты через одноразовую задачу планировщика, чтобы не оборвать сессию самого обновления.
 
 ## Тесты
 
