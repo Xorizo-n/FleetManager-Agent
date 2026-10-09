@@ -1,19 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <ApplicationIcon>..\..\assets\fleet_manager_agent.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\FleetManager.Agent.Core\FleetManager.Agent.Core.csproj" />
-    <ProjectReference Include="..\FleetManager.Agent.Ui\FleetManager.Agent.Ui.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The exe's own Win32 icon resource only yields 32x32 through ExtractAssociatedIcon;
+         the tray needs a crisp small icon to draw the status dot on. -->
+    <EmbeddedResource Include="..\..\assets\fleet_manager_agent.ico" LogicalName="FleetManager.Agent.Ui.AppIcon.ico" />
   </ItemGroup>
 </Project>

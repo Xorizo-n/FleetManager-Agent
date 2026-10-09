@@ -13,7 +13,8 @@ public sealed class AgentState
         var options = AgentOptions.Load(DataDirectory);
         var machineId = MachineIdentity.GetOrCreate(DataDirectory);
         _status = new AgentStatus(machineId, Environment.MachineName, AgentLifecycleState.Starting,
-            DateTimeOffset.UtcNow, null, null, null, options.ServerUrl, 0, null);
+            DateTimeOffset.UtcNow, null, null, null, options.ServerUrl, 0, null,
+            AgentVersion: Core.AgentVersion.Current);
     }
 
     public string DataDirectory { get; }
@@ -38,7 +39,14 @@ public sealed class AgentState
         }
     }
 
-    public void MarkSync(DateTimeOffset at, int softwareCount, HardwareSnapshot? hardware)
+    public void MarkSyncStarted() { lock (_gate) _status = _status with { IsSyncing = true }; }
+
+    public void MarkSyncFinished() { lock (_gate) _status = _status with { IsSyncing = false }; }
+
+    public void SetNextSync(DateTimeOffset at) { lock (_gate) _status = _status with { NextSyncAt = at }; }
+
+    /// <param name="issue">ServerNotConfigured when the inventory was only collected locally.</param>
+    public void MarkSync(DateTimeOffset at, int softwareCount, HardwareSnapshot? hardware, AgentIssue issue = AgentIssue.None)
     {
         lock (_gate)
         {
@@ -51,8 +59,18 @@ public sealed class AgentState
                 LastError = null,
                 LastErrorAt = null,
                 SoftwareCount = _softwareCount,
-                HardwareFingerprint = _hardware?.Fingerprint
+                HardwareFingerprint = _hardware?.Fingerprint,
+                Issue = issue
             };
+        }
+    }
+
+    /// <summary>Synchronization deliberately skipped (e.g. registration waits for a reboot); not an error.</summary>
+    public void MarkWaiting(AgentIssue issue)
+    {
+        lock (_gate)
+        {
+            _status = _status with { State = AgentLifecycleState.Running, LastError = null, LastErrorAt = null, Issue = issue };
         }
     }
 
@@ -60,7 +78,13 @@ public sealed class AgentState
     {
         lock (_gate)
         {
-            _status = _status with { State = AgentLifecycleState.Degraded, LastErrorAt = DateTimeOffset.UtcNow, LastError = exception.Message };
+            _status = _status with
+            {
+                State = AgentLifecycleState.Degraded,
+                LastErrorAt = DateTimeOffset.UtcNow,
+                LastError = exception.Message,
+                Issue = AgentIssues.Classify(exception)
+            };
         }
     }
 

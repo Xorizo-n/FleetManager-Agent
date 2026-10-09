@@ -55,7 +55,7 @@ public sealed class FleetManagerApiClient
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new HttpRequestException($"Fleet Manager returned {(int)response.StatusCode}: {body}");
+            throw new HttpRequestException($"Fleet Manager returned {(int)response.StatusCode}: {body}", null, response.StatusCode);
         }
         _logger.Info("Heartbeat and inventory uploaded successfully.");
     }
@@ -74,7 +74,7 @@ public sealed class FleetManagerApiClient
         };
         using var response = await _httpClient.PostAsJsonAsync($"{AgentConfiguration.DefaultApiPath}/register", payload, JsonDefaults.Options, cancellationToken);
         if (!response.IsSuccessStatusCode)
-            throw new HttpRequestException($"Fleet Manager registration returned {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync(cancellationToken)}");
+            throw new HttpRequestException($"Fleet Manager registration returned {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync(cancellationToken)}", null, response.StatusCode);
         return await response.Content.ReadFromJsonAsync<AgentRegistrationResult>(JsonDefaults.Options, cancellationToken)
                ?? throw new InvalidOperationException("Fleet Manager returned an empty registration response.");
     }
