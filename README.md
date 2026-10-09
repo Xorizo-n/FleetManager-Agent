@@ -11,6 +11,7 @@ Windows-агент для Fleet Manager. Вариант 1 состоит из с
 
 - `src/FleetManager.Agent.Core` — конфигурация, machine-id, состояние, журнал, Named Pipe, API-клиент и сбор инвентаризации.
 - `src/FleetManager.Agent.Service` — фоновая служба: периодический сбор железа/ПО, heartbeat и обработка локальных команд.
+- `src/FleetManager.Agent.Ui` — общие для Tray и Control тема и элементы интерфейса в стиле Windows 11 (светлая и тёмная тема, акцентный цвет системы).
 - `src/FleetManager.Agent.Tray` — неэле­вированный процесс в области уведомлений; открывает Control через `runas`.
 - `src/FleetManager.Agent.Control` — WinForms-панель с manifest `requireAdministrator`.
 - `installer` — `FleetManagerAgent.iss` (Inno Setup; единственный источник логики установки — OpenSSH Server на порту 22 только для сервера, firewall, служба, автозапуск tray) и `uninstall.ps1` (ручное локальное удаление вне пакета).

@@ -7,6 +7,7 @@ public static class AgentConfiguration
 {
     public const string ProductName = "FleetManagerAgent";
     public const string PipeName = "FleetManagerAgent";
+    public const string ServiceName = "FleetManagerAgent";
     public const string DefaultApiPath = "/api/agent";
 
     public static string DefaultDataDirectory => Path.Combine(

@@ -10,6 +10,10 @@ namespace FleetManager.Agent.Core;
 
 public sealed class AgentPipeClient
 {
+    // The server always keeps an instance listening, so a running service is connected to at
+    // once; a long wait only delays reporting a stopped one (tray tooltip, control panel).
+    private const int ConnectTimeoutMs = 1500;
+
     // Pipe uses line-framing (WriteLineAsync / ReadLineAsync).
     // WriteIndented MUST be false here — indented JSON spans multiple lines and
     // ReadLineAsync would return only the opening "{", breaking deserialization.
@@ -20,10 +24,15 @@ public sealed class AgentPipeClient
         PropertyNameCaseInsensitive = true
     };
 
+    private readonly string _pipeName;
+
+    /// <param name="pipeName">Overridden only by tests, so they never talk to an installed agent.</param>
+    public AgentPipeClient(string pipeName = AgentConfiguration.PipeName) => _pipeName = pipeName;
+
     public async Task<AgentPipeResponse> SendAsync(AgentPipeRequest request, CancellationToken cancellationToken = default)
     {
-        await using var pipe = new NamedPipeClientStream(".", AgentConfiguration.PipeName, PipeDirection.InOut, System.IO.Pipes.PipeOptions.Asynchronous);
-        await pipe.ConnectAsync(3000, cancellationToken);
+        await using var pipe = new NamedPipeClientStream(".", _pipeName, PipeDirection.InOut, System.IO.Pipes.PipeOptions.Asynchronous);
+        await pipe.ConnectAsync(ConnectTimeoutMs, cancellationToken);
         await using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
         using var reader = new StreamReader(pipe, Encoding.UTF8, leaveOpen: true);
         await writer.WriteLineAsync(JsonSerializer.Serialize(request, JsonWireOptions));
@@ -36,6 +45,21 @@ public sealed class AgentPipeClient
 
     public Task<AgentPipeResponse> GetStatusAsync(CancellationToken cancellationToken = default) =>
         SendAsync(new AgentPipeRequest("status"), cancellationToken);
+
+    /// <summary>Current service status, or null when the service does not answer.</summary>
+    public async Task<AgentStatus?> TryGetStatusAsync(TimeSpan timeout)
+    {
+        try
+        {
+            using var cancellation = new CancellationTokenSource(timeout);
+            var response = await GetStatusAsync(cancellation.Token);
+            return response.Success ? response.DataAs<AgentStatus>() : null;
+        }
+        catch (Exception ex) when (ex is IOException or TimeoutException or OperationCanceledException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
 
     public Task<AgentPipeResponse> GetLogsAsync(int lines = 200, CancellationToken cancellationToken = default) =>
         SendAsync(new AgentPipeRequest("logs", lines.ToString()), cancellationToken);
@@ -59,26 +83,64 @@ public sealed class AgentPipeServer
     private readonly AgentLogger _logger;
     private readonly Func<CancellationToken, Task> _sync;
     private readonly CancellationToken _stoppingToken;
+    private readonly string _pipeName;
 
-    public AgentPipeServer(AgentState state, AgentLogger logger, Func<CancellationToken, Task> sync, CancellationToken stoppingToken)
+    public AgentPipeServer(AgentState state, AgentLogger logger, Func<CancellationToken, Task> sync, CancellationToken stoppingToken,
+        string pipeName = AgentConfiguration.PipeName)
     {
         _state = state;
         _logger = logger;
         _sync = sync;
         _stoppingToken = stoppingToken;
+        _pipeName = pipeName;
     }
+
+    // "sync" holds its connection until the synchronization finishes (up to minutes). With a
+    // single instance every other client — the tray polling "status" — timed out meanwhile and
+    // reported the service as unavailable, so clients are served concurrently.
+    private const int MaxInstances = 8;
 
     public async Task RunAsync()
     {
         while (!_stoppingToken.IsCancellationRequested)
         {
-            await using var pipe = NamedPipeServerStreamAcl.Create(AgentConfiguration.PipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous, 0, 0, CreatePipeSecurity());
+            NamedPipeServerStream pipe;
+            try
+            {
+                pipe = NamedPipeServerStreamAcl.Create(_pipeName, PipeDirection.InOut, MaxInstances, PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous, 0, 0, CreatePipeSecurity());
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // All instances are busy: wait for one to be released.
+                try { await Task.Delay(250, _stoppingToken); } catch (OperationCanceledException) { break; }
+                continue;
+            }
+
             try
             {
                 await pipe.WaitForConnectionAsync(_stoppingToken);
-                await HandleAsync(pipe, _stoppingToken);
             }
-            catch (OperationCanceledException) when (_stoppingToken.IsCancellationRequested) { break; }
+            catch (OperationCanceledException) when (_stoppingToken.IsCancellationRequested)
+            {
+                await pipe.DisposeAsync();
+                break;
+            }
+            catch (Exception ex)
+            {
+                await pipe.DisposeAsync();
+                _logger.Error("Named pipe connection failed", ex);
+                continue;
+            }
+            _ = ServeAsync(pipe);
+        }
+    }
+
+    private async Task ServeAsync(NamedPipeServerStream pipe)
+    {
+        await using (pipe)
+        {
+            try { await HandleAsync(pipe, _stoppingToken); }
+            catch (OperationCanceledException) when (_stoppingToken.IsCancellationRequested) { }
             catch (Exception ex) { _logger.Error("Named pipe request failed", ex); }
         }
     }
@@ -87,9 +149,16 @@ public sealed class AgentPipeServer
     // creator, so an unelevated tray process can't connect and always sees "недоступна".
     // Grant authenticated users read/write explicitly (command-level authorization for
     // privileged actions like set-server-url still happens in ExecuteAsync via IsAdministrator).
+    // The account running the server needs CreateNewInstance for every instance after the first;
+    // LocalSystem has it through FullControl, the explicit rule keeps that true for any account.
     private static PipeSecurity CreatePipeSecurity()
     {
         var security = new PipeSecurity();
+        using (var current = WindowsIdentity.GetCurrent())
+        {
+            if (current.User is { } user)
+                security.AddAccessRule(new PipeAccessRule(user, PipeAccessRights.FullControl, AccessControlType.Allow));
+        }
         security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
         security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));
         security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), PipeAccessRights.FullControl, AccessControlType.Allow));

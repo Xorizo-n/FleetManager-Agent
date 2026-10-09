@@ -8,6 +8,9 @@ public sealed class AgentWorker : BackgroundService
     private readonly AgentState _state;
     private readonly AgentLogger _logger;
     private readonly IInventoryCollector _inventory;
+    // The periodic loop and "sync" from Tray/Control may ask at the same time; the run
+    // mutates _options and the state, so syncs are serialized.
+    private readonly SemaphoreSlim _syncGate = new(1, 1);
     private AgentOptions _options;
     private bool _renameWaitLogged;
 
@@ -31,7 +34,9 @@ public sealed class AgentWorker : BackgroundService
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                await Task.Delay(SyncSchedule.NextDelay(_options), stoppingToken);
+                var delay = SyncSchedule.NextDelay(_options);
+                _state.SetNextSync(DateTimeOffset.UtcNow + delay);
+                await Task.Delay(delay, stoppingToken);
                 await SyncOnceAsync(stoppingToken);
             }
         }
@@ -54,6 +59,9 @@ public sealed class AgentWorker : BackgroundService
 
     private async Task SyncOnceAsync(CancellationToken cancellationToken)
     {
+        try { await _syncGate.WaitAsync(cancellationToken); }
+        catch (OperationCanceledException) { return; }
+        _state.MarkSyncStarted();
         try
         {
             _options = AgentOptions.Load(_state.DataDirectory);
@@ -83,13 +91,19 @@ public sealed class AgentWorker : BackgroundService
             {
                 _logger.Warn("Server URL is not configured; inventory collected locally only.");
             }
-            _state.MarkSync(DateTimeOffset.UtcNow, software.Count, hardware);
+            _state.MarkSync(DateTimeOffset.UtcNow, software.Count, hardware,
+                api is null ? AgentIssue.ServerNotConfigured : AgentIssue.None);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex)
         {
             _state.MarkError(ex);
             _logger.Error("Inventory synchronization failed", ex);
+        }
+        finally
+        {
+            _state.MarkSyncFinished();
+            _syncGate.Release();
         }
     }
 
@@ -98,7 +112,7 @@ public sealed class AgentWorker : BackgroundService
     {
         if (!string.IsNullOrWhiteSpace(_options.AgentToken)) return true;
         if (string.IsNullOrWhiteSpace(_options.EnrollmentToken))
-            throw new InvalidOperationException("Enrollment token is not configured.");
+            throw new AgentIssueException(AgentIssue.NotEnrolled, "Enrollment token is not configured.");
         // The host is registered under Environment.MachineName. Right after a rename (e.g. the
         // AutoDomain domain join) that is still the old name until the reboot, so wait for it.
         if (ComputerRename.IsPending())
@@ -108,6 +122,7 @@ public sealed class AgentWorker : BackgroundService
                 _logger.Info("Computer rename is pending a reboot; registration waits until the new name is active.");
                 _renameWaitLogged = true;
             }
+            _state.MarkWaiting(AgentIssue.AwaitingReboot);
             return false;
         }
         var registration = await api.RegisterAsync(

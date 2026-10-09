@@ -12,6 +12,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FleetManager.Agent.Control"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FleetManager.Agent.Core.Tests", "tests\FleetManager.Agent.Core.Tests\FleetManager.Agent.Core.Tests.csproj", "{EBD8D3C7-2C3F-42B5-8E58-2B0E0D7A46F5}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FleetManager.Agent.Ui", "src\FleetManager.Agent.Ui\FleetManager.Agent.Ui.csproj", "{4591401C-085F-45FB-A59D-DE01E8D5CB45}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -38,5 +40,9 @@ Global
 		{EBD8D3C7-2C3F-42B5-8E58-2B0E0D7A46F5}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{EBD8D3C7-2C3F-42B5-8E58-2B0E0D7A46F5}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{EBD8D3C7-2C3F-42B5-8E58-2B0E0D7A46F5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4591401C-085F-45FB-A59D-DE01E8D5CB45}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4591401C-085F-45FB-A59D-DE01E8D5CB45}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4591401C-085F-45FB-A59D-DE01E8D5CB45}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4591401C-085F-45FB-A59D-DE01E8D5CB45}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
