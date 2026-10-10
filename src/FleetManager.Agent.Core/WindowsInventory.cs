@@ -59,12 +59,18 @@ $items | Where-Object Name | Sort-Object Name,Version -Unique | ConvertTo-Json -
         }
     }
 
-    private static async Task<string> RunPowerShellAsync(string script, CancellationToken cancellationToken)
+    // Windows PowerShell 5.1 пишет в перенаправленный stdout в OEM-кодировке консоли
+    // (cp866 на русской Windows), а читаем мы UTF-8: кириллица в названиях ОС и ПО
+    // превращалась в «�». Переключаем вывод на UTF-8 до запуска скрипта; заодно
+    // choco и winget, которых скрипт вызывает, наследуют кодовую страницу консоли.
+    internal const string Utf8OutputPrefix = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ";
+
+    internal static async Task<string> RunPowerShellAsync(string script, CancellationToken cancellationToken)
     {
         var psi = new ProcessStartInfo
         {
             FileName = OperatingSystem.IsWindows() ? "powershell.exe" : "pwsh",
-            Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& { " + script.Replace("\"", "\\\"") + " }\"",
+            Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& { " + (Utf8OutputPrefix + script).Replace("\"", "\\\"") + " }\"",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
