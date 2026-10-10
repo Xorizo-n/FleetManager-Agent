@@ -15,7 +15,11 @@ public sealed class WindowsInventoryCollector : IInventoryCollector
 {
     public async Task<HardwareSnapshot> CollectHardwareAsync(CancellationToken cancellationToken)
     {
-        const string script = "Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer,Model,TotalPhysicalMemory | ConvertTo-Json -Compress; Get-CimInstance Win32_BIOS | Select-Object SerialNumber | ConvertTo-Json -Compress; Get-CimInstance Win32_OperatingSystem | Select-Object Caption | ConvertTo-Json -Compress; Get-CimInstance Win32_Processor | Select-Object -First 1 Name | ConvertTo-Json -Compress";
+        // Название ОС берётся из реестра, а не из Win32_OperatingSystem.Caption: Caption
+        // локализуется по языку интерфейса и приходил то «Microsoft Windows 11 Enterprise»,
+        // то «Майкрософт Windows 11 Корпоративная». Название входит в отпечаток железа,
+        // поэтому каждая смена языка отправляла на сервер ложный алерт hardware_changed.
+        const string script = "Get-CimInstance Win32_ComputerSystem | Select-Object Manufacturer,Model,TotalPhysicalMemory | ConvertTo-Json -Compress; Get-CimInstance Win32_BIOS | Select-Object SerialNumber | ConvertTo-Json -Compress; $v = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion' -ErrorAction SilentlyContinue; [pscustomobject]@{ ProductName = $v.ProductName; CurrentBuildNumber = $v.CurrentBuildNumber; Caption = (Get-CimInstance Win32_OperatingSystem).Caption } | ConvertTo-Json -Compress; Get-CimInstance Win32_Processor | Select-Object -First 1 Name | ConvertTo-Json -Compress";
         var output = await RunPowerShellAsync(script, cancellationToken);
         var objects = ParseJsonObjects(output);
         var computer = objects.ElementAtOrDefault(0);
@@ -24,8 +28,27 @@ public sealed class WindowsInventoryCollector : IInventoryCollector
         var cpu = objects.ElementAtOrDefault(3);
         var hardware = new HardwareSnapshot(
             GetString(computer, "Manufacturer"), GetString(computer, "Model"), GetString(bios, "SerialNumber"),
-            GetString(os, "Caption"), GetString(cpu, "Name"), GetLong(computer, "TotalPhysicalMemory"), null);
+            OperatingSystemName(GetString(os, "ProductName"), GetString(os, "CurrentBuildNumber"), GetString(os, "Caption")),
+            GetString(cpu, "Name"), GetLong(computer, "TotalPhysicalMemory"), null);
         return hardware with { Fingerprint = Fingerprint(hardware) };
+    }
+
+    /// <summary>
+    /// Название ОС в одном виде независимо от языка интерфейса: «Microsoft Windows 11 Enterprise».
+    /// ProductName в реестре не локализуется, но на Windows 11 по-прежнему начинается
+    /// с «Windows 10» — её отличает номер сборки (22000 и выше). Без ProductName
+    /// остаётся Caption, как раньше.
+    /// </summary>
+    internal static string? OperatingSystemName(string? productName, string? buildNumber, string? caption)
+    {
+        if (string.IsNullOrWhiteSpace(productName)) return caption;
+        var name = productName.Trim();
+        if (name.StartsWith("Windows 10", StringComparison.OrdinalIgnoreCase)
+            && int.TryParse(buildNumber, out var build) && build >= 22000)
+        {
+            name = "Windows 11" + name["Windows 10".Length..];
+        }
+        return name.StartsWith("Microsoft ", StringComparison.OrdinalIgnoreCase) ? name : "Microsoft " + name;
     }
 
     public async Task<IReadOnlyList<SoftwareEntry>> CollectSoftwareAsync(CancellationToken cancellationToken)
