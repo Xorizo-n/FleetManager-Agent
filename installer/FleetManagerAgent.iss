@@ -37,6 +37,12 @@
 ; decided by Windows (Administrators / Remote Desktop Users). /EnableRdp=0 skips
 ; the step; it never disables RDP that is already on.
 ;
+; Wake-on-LAN is prepared for the server's "Wake up" button: wired adapters answer
+; the magic packet and may wake the PC, and fast startup is turned off (with it a
+; shutdown is hibernation, from which LAN wake mostly fails). Wake on LAN must
+; also be allowed in the BIOS - that part cannot be done from Windows.
+; /EnableWol=0 skips the step.
+;
 ; Silent uninstall (includes remote server cleanup):
 ;   "%ProgramFiles%\FleetManager Agent\unins000.exe" /VERYSILENT
 ;
@@ -144,6 +150,7 @@ var
   GDeferStart:      Boolean;  // /DeferStart: служба стартует только после перезагрузки
   GResetSshHostKeys: Boolean; // /ResetSshHostKeys: заменить SSH-ключи хоста, унаследованные от эталона
   GEnableRdp:       Boolean;  // включить удалённый рабочий стол; /EnableRdp=0 — не трогать
+  GEnableWol:       Boolean;  // подготовить пробуждение по сети; /EnableWol=0 — не трогать
 
 // Флаг командной строки: /Name=1 (любое непустое значение, кроме 0 и false).
 function ParamFlag(const Name: string): Boolean;
@@ -286,6 +293,7 @@ begin
   GDeferStart       := ParamFlag('DeferStart');
   GResetSshHostKeys := ParamFlag('ResetSshHostKeys');
   GEnableRdp        := ParamFlagDefaultOn('EnableRdp');
+  GEnableWol        := ParamFlagDefaultOn('EnableWol');
 
   // /InstallRoot=... accepted as an alias for /DIR=...
   InstallRootParam := Trim(ExpandConstant('{param:InstallRoot|}'));
@@ -425,6 +433,7 @@ begin
     '$deferStart  = ' + PsBool(GDeferStart) + NL +
     '$resetSshHostKeys = ' + PsBool(GResetSshHostKeys) + NL +
     '$enableRdp   = ' + PsBool(GEnableRdp) + NL +
+    '$enableWol   = ' + PsBool(GEnableWol) + NL +
     '$sshdRestartNeeded = $false' + NL +
     '# sshd.exe from the service registration: the capability build lives in System32,' + NL +
     '# the MSI build used by the old install.ps1 in Program Files.' + NL +
@@ -595,6 +604,41 @@ begin
     '    }' + NL +
     '} else {' + NL +
     '    Log ''Remote Desktop left as is (/EnableRdp=0)''' + NL +
+    '}' + NL +
+    '' + NL +
+    '# Wake-on-LAN for the server''s "Wake up" button (it sends the magic packet from' + NL +
+    '# an online PC of the same subnet). Wired adapters: magic packet on in Windows and' + NL +
+    '# in the driver, and both power-management boxes - "allow the computer to turn off' + NL +
+    '# this device" and "allow this device to wake the computer" - via MSPower_* in' + NL +
+    '# root\wmi: powercfg /deviceenableawake refuses while the first box is off (seen on' + NL +
+    '# SU5-K204-W25). -NoRestart everywhere: an adapter reset would cut the SSH session' + NL +
+    '# of a remote update. Fast startup off: with it a shutdown is hibernation, from' + NL +
+    '# which LAN wake mostly fails. The BIOS must allow wake on LAN too. Non-fatal.' + NL +
+    'if ($enableWol) {' + NL +
+    '    try {' + NL +
+    '        $nics = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.PhysicalMediaType -eq ''802.3'' })' + NL +
+    '        if (-not $nics) { throw ''no wired network adapter'' }' + NL +
+    '        foreach ($nic in $nics) {' + NL +
+    '            Set-NetAdapterPowerManagement -Name $nic.Name -WakeOnMagicPacket Enabled -NoRestart -ErrorAction SilentlyContinue' + NL +
+    '            foreach ($keyword in ''*WakeOnMagicPacket'', ''S5WakeOnLan'') {' + NL +
+    '                $property = Get-NetAdapterAdvancedProperty -Name $nic.Name -RegistryKeyword $keyword -ErrorAction SilentlyContinue' + NL +
+    '                if ($property -and [string]$property.RegistryValue -ne ''1'') { Set-NetAdapterAdvancedProperty -Name $nic.Name -RegistryKeyword $keyword -RegistryValue 1 -NoRestart }' + NL +
+    '            }' + NL +
+    '            foreach ($class in ''MSPower_DeviceEnable'', ''MSPower_DeviceWakeEnable'') {' + NL +
+    '                Get-CimInstance -Namespace root\wmi -ClassName $class -ErrorAction SilentlyContinue |' + NL +
+    '                    Where-Object { $_.InstanceName.StartsWith($nic.PnPDeviceID, [StringComparison]::OrdinalIgnoreCase) -and -not $_.Enable } |' + NL +
+    '                    Set-CimInstance -Property @{ Enable = $true }' + NL +
+    '            }' + NL +
+    '        }' + NL +
+    '        Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power'' -Name HiberbootEnabled -Value 0 -Type DWord' + NL +
+    '        $armed = @(powercfg /devicequery wake_armed | Where-Object { $_.Trim() })' + NL +
+    '        $wakers = @($nics | Where-Object { $armed -contains $_.InterfaceDescription } | ForEach-Object { $_.InterfaceDescription })' + NL +
+    '        Log "Wake-on-LAN prepared, fast startup off; adapters that may wake the PC: $(if ($wakers) { $wakers -join '', '' } else { ''none (check the BIOS/driver)'' })"' + NL +
+    '    } catch {' + NL +
+    '        Log "Wake-on-LAN warning (non-fatal): $_"' + NL +
+    '    }' + NL +
+    '} else {' + NL +
+    '    Log ''Wake-on-LAN left as is (/EnableWol=0)''' + NL +
     '}' + NL +
     '' + NL +
     '# Windows service (fatal if it fails)' + NL +

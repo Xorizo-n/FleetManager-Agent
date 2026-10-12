@@ -57,7 +57,24 @@ public sealed record HardwareSnapshot(
     string? OperatingSystem,
     string? Processor,
     long? TotalMemoryBytes,
-    string? Fingerprint);
+    string? Fingerprint)
+{
+    /// <summary>
+    /// Физические сетевые адаптеры — MAC нужен серверу для пробуждения по сети (Wake-on-LAN).
+    /// В отпечаток железа не входят: USB-адаптер или док-станция давали бы ложные алерты.
+    /// </summary>
+    public IReadOnlyList<NetworkAdapterInfo> NetworkAdapters { get; init; } = Array.Empty<NetworkAdapterInfo>();
+}
+
+/// <param name="Ipv4">Адреса с длиной префикса: «10.152.5.56/25» — по ним сервер находит соседей по подсети.</param>
+/// <param name="MediaType">PhysicalMediaType: «802.3» — проводной, через него и будят.</param>
+public sealed record NetworkAdapterInfo(
+    string? Name,
+    string? Description,
+    string MacAddress,
+    IReadOnlyList<string> Ipv4,
+    string? Status,
+    string? MediaType);
 
 public sealed record SoftwareEntry(
     string Name,

@@ -36,7 +36,16 @@ public sealed class FleetManagerApiClient
                 operating_system = snapshot.Hardware.OperatingSystem,
                 processor = snapshot.Hardware.Processor,
                 total_memory_bytes = snapshot.Hardware.TotalMemoryBytes,
-                fingerprint = snapshot.Hardware.Fingerprint
+                fingerprint = snapshot.Hardware.Fingerprint,
+                network_adapters = snapshot.Hardware.NetworkAdapters.Select(adapter => new
+                {
+                    name = adapter.Name,
+                    description = adapter.Description,
+                    mac_address = adapter.MacAddress,
+                    ipv4 = adapter.Ipv4,
+                    status = adapter.Status,
+                    media_type = adapter.MediaType
+                }).ToArray()
             },
             software = snapshot.Software.Select(item => new
             {

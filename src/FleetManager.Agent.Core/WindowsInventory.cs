@@ -30,7 +30,55 @@ public sealed class WindowsInventoryCollector : IInventoryCollector
             GetString(computer, "Manufacturer"), GetString(computer, "Model"), GetString(bios, "SerialNumber"),
             OperatingSystemName(GetString(os, "ProductName"), GetString(os, "CurrentBuildNumber"), GetString(os, "Caption")),
             GetString(cpu, "Name"), GetLong(computer, "TotalPhysicalMemory"), null);
-        return hardware with { Fingerprint = Fingerprint(hardware) };
+        var adapters = ParseNetworkAdapters(await RunPowerShellAsync(NetworkAdaptersScript, cancellationToken));
+        return hardware with { Fingerprint = Fingerprint(hardware), NetworkAdapters = adapters };
+    }
+
+    // Физические адаптеры с MAC и IPv4/префиксом. -InputObject — чтобы и один адаптер
+    // пришёл массивом.
+    private const string NetworkAdaptersScript =
+        "ConvertTo-Json -Compress -Depth 3 -InputObject @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object { " +
+        "[pscustomobject]@{ Name = $_.Name; Description = $_.InterfaceDescription; MacAddress = $_.MacAddress; Status = [string]$_.Status; MediaType = [string]$_.PhysicalMediaType; " +
+        "Ipv4 = @(Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.IPAddress + '/' + $_.PrefixLength }) } })";
+
+    /// <summary>
+    /// Разбирает вывод NetworkAdaptersScript. Bluetooth (PAN) и адаптеры без MAC отбрасываются.
+    /// Windows PowerShell 5.1 иногда сериализует вложенный массив как {"value":[…],"Count":n} —
+    /// поэтому Ipv4 принимается и строкой, и массивом, и таким объектом.
+    /// </summary>
+    internal static IReadOnlyList<NetworkAdapterInfo> ParseNetworkAdapters(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return Array.Empty<NetworkAdapterInfo>();
+        try
+        {
+            using var document = JsonDocument.Parse(output);
+            var items = document.RootElement.ValueKind == JsonValueKind.Array
+                ? document.RootElement.EnumerateArray().ToArray()
+                : new[] { document.RootElement };
+            return items
+                .Where(x => x.ValueKind == JsonValueKind.Object)
+                .Select(x => new NetworkAdapterInfo(
+                    GetString(x, "Name"), GetString(x, "Description"), (GetString(x, "MacAddress") ?? string.Empty).Trim(),
+                    StringList(x, "Ipv4"), GetString(x, "Status"), GetString(x, "MediaType")))
+                .Where(x => x.MacAddress.Length > 0 && !(x.MediaType ?? string.Empty).Contains("bluetooth", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<NetworkAdapterInfo>();
+        }
+    }
+
+    private static IReadOnlyList<string> StringList(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var value)) return Array.Empty<string>();
+        if (value.ValueKind == JsonValueKind.Object && value.TryGetProperty("value", out var inner)) value = inner;
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => new[] { value.GetString()! },
+            JsonValueKind.Array => value.EnumerateArray().Where(v => v.ValueKind == JsonValueKind.String).Select(v => v.GetString()!).ToArray(),
+            _ => Array.Empty<string>(),
+        };
     }
 
     /// <summary>
