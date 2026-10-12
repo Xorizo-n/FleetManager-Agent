@@ -176,4 +176,28 @@ if ($buildScript -notmatch '/p:Version=\$AppVersion') {
 if ($buildScript -notmatch '/p:InformationalVersion=\$AppVersion') {
     throw 'build-installer.ps1 must stamp InformationalVersion so the exact version string survives.'
 }
+# Удалённый рабочий стол: включается при установке (кнопка RDP в карточке хоста),
+# с NLA, через встроенную группу правил брандмауэра по идентификатору ресурса (имя
+# локализовано); /EnableRdp=0 шаг пропускает.
+$rdpBlock = [regex]::Match($iss, '# Remote Desktop for administrators[\s\S]*?# Windows service').Value
+if (-not $rdpBlock) {
+    throw 'Installer must contain the Remote Desktop block before the Windows service block.'
+}
+if ($iss -notmatch "ParamFlagDefaultOn\('EnableRdp'\)") {
+    throw 'Remote Desktop must be on by default with /EnableRdp=0 as the opt-out.'
+}
+foreach ($needle in @('fDenyTSConnections -Value 0', 'UserAuthentication -Value 1', "Get-NetFirewallRule -Group ''@FirewallAPI.dll,-28752''")) {
+    if (-not $rdpBlock.Contains($needle)) {
+        throw "Remote Desktop block must contain: $needle"
+    }
+}
+# TermService, запущенная при выключенном RDP, не открывает 3389 до перезапуска;
+# перезапускать можно, только когда за ПК никто не работает.
+if (-not $rdpBlock.Contains('Restart-Service TermService') -or -not $rdpBlock.Contains('quser')) {
+    throw 'Remote Desktop block must restart TermService when nothing listens on 3389, but only with no users logged on.'
+}
+if ($rdpBlock -notmatch "try \{[\s\S]*catch \{[\s\S]*Remote Desktop warning \(non-fatal\)") {
+    throw 'The Remote Desktop step must be non-fatal.'
+}
+
 Write-Output 'INSTALL_SCRIPT_TESTS_OK'

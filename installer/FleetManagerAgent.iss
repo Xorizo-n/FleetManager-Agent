@@ -31,6 +31,12 @@
 ; /SshSourceAddress (IPv4 or CIDR, comma-separated), else the value kept in
 ; agent.json, else the address(es) of the ServerUrl host.
 ;
+; Remote Desktop is enabled for administrators (Fleet Manager's host card offers
+; an RDP button): connections allowed, Network Level Authentication required, the
+; built-in "Remote Desktop" firewall group enabled. Who may log on is still
+; decided by Windows (Administrators / Remote Desktop Users). /EnableRdp=0 skips
+; the step; it never disables RDP that is already on.
+;
 ; Silent uninstall (includes remote server cleanup):
 ;   "%ProgramFiles%\FleetManager Agent\unins000.exe" /VERYSILENT
 ;
@@ -137,6 +143,7 @@ var
   GUpgrade:         Boolean;  // поверх уже зарегистрированного агента
   GDeferStart:      Boolean;  // /DeferStart: служба стартует только после перезагрузки
   GResetSshHostKeys: Boolean; // /ResetSshHostKeys: заменить SSH-ключи хоста, унаследованные от эталона
+  GEnableRdp:       Boolean;  // включить удалённый рабочий стол; /EnableRdp=0 — не трогать
 
 // Флаг командной строки: /Name=1 (любое непустое значение, кроме 0 и false).
 function ParamFlag(const Name: string): Boolean;
@@ -145,6 +152,15 @@ var
 begin
   Value := Trim(ExpandConstant('{param:' + Name + '|}'));
   Result := (Value <> '') and (CompareText(Value, '0') <> 0) and (CompareText(Value, 'false') <> 0);
+end;
+
+// Флаг, включённый по умолчанию: выключает только /Name=0 или /Name=false.
+function ParamFlagDefaultOn(const Name: string): Boolean;
+var
+  Value: string;
+begin
+  Value := Trim(ExpandConstant('{param:' + Name + '|1}'));
+  Result := (CompareText(Value, '0') <> 0) and (CompareText(Value, 'false') <> 0);
 end;
 
 function DataRootDir: string;
@@ -269,6 +285,7 @@ begin
 
   GDeferStart       := ParamFlag('DeferStart');
   GResetSshHostKeys := ParamFlag('ResetSshHostKeys');
+  GEnableRdp        := ParamFlagDefaultOn('EnableRdp');
 
   // /InstallRoot=... accepted as an alias for /DIR=...
   InstallRootParam := Trim(ExpandConstant('{param:InstallRoot|}'));
@@ -407,6 +424,7 @@ begin
     '$sshSourceParam = ' + PsLiteral(GSshSource) + NL +
     '$deferStart  = ' + PsBool(GDeferStart) + NL +
     '$resetSshHostKeys = ' + PsBool(GResetSshHostKeys) + NL +
+    '$enableRdp   = ' + PsBool(GEnableRdp) + NL +
     '$sshdRestartNeeded = $false' + NL +
     '# sshd.exe from the service registration: the capability build lives in System32,' + NL +
     '# the MSI build used by the old install.ps1 in Program Files.' + NL +
@@ -533,6 +551,50 @@ begin
     '    Log ''OpenSSH OK (port 22, restricted source)''' + NL +
     '} catch {' + NL +
     '    Log "OpenSSH warning (non-fatal): $_"' + NL +
+    '}' + NL +
+    '' + NL +
+    '# Remote Desktop for administrators (RDP button in the Fleet Manager host card).' + NL +
+    '# Connections allowed, NLA required (credentials before the logon screen), the' + NL +
+    '# built-in "Remote Desktop" firewall group enabled - by its resource id, the' + NL +
+    '# display name is localized. Who may log on stays with Windows. Non-fatal.' + NL +
+    'if ($enableRdp) {' + NL +
+    '    try {' + NL +
+    '        $termService = Get-Service TermService -ErrorAction SilentlyContinue' + NL +
+    '        if (-not $termService) { throw ''Remote Desktop Services are not available in this Windows edition'' }' + NL +
+    '        $ts = ''HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server''' + NL +
+    '        Set-ItemProperty -Path $ts -Name fDenyTSConnections -Value 0 -Type DWord' + NL +
+    '        Set-ItemProperty -Path "$ts\WinStations\RDP-Tcp" -Name UserAuthentication -Value 1 -Type DWord' + NL +
+    '        if ($termService.StartType -eq ''Disabled'') { Set-Service TermService -StartupType Manual; Log ''TermService was disabled, set to Manual'' }' + NL +
+    '        if ((Get-Service TermService).Status -ne ''Running'') { Start-Service TermService }' + NL +
+    '        $rdpRules = @(Get-NetFirewallRule -Group ''@FirewallAPI.dll,-28752'' -ErrorAction SilentlyContinue)' + NL +
+    '        if ($rdpRules) { $rdpRules | Enable-NetFirewallRule } else { Log ''WARNING: the built-in Remote Desktop firewall group was not found'' }' + NL +
+    '        $policy = Get-ItemProperty ''HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'' -ErrorAction SilentlyContinue' + NL +
+    '        if ($policy -and $policy.fDenyTSConnections -eq 1) { Log ''WARNING: Group Policy forbids Remote Desktop connections; the local setting is overridden'' }' + NL +
+    '        $ignoredOn = @(Get-NetFirewallProfile -PolicyStore ActiveStore | Where-Object { $_.Enabled -eq ''True'' -and $_.AllowLocalFirewallRules -eq ''False'' } | ForEach-Object { $_.Name })' + NL +
+    '        if ($ignoredOn) { Log "WARNING: Group Policy ignores local firewall rules on $($ignoredOn -join '', ''); inbound RDP (TCP 3389) follows the GPO" }' + NL +
+    '        # TermService creates the RDP listener only when it starts: one that started' + NL +
+    '        # while RDP was off keeps port 3389 closed until it restarts (MR32-025-1-04:' + NL +
+    '        # settings, firewall and even a WMI toggle did not help). Restart it only when' + NL +
+    '        # nobody is logged on; otherwise RDP comes up at the next reboot.' + NL +
+    '        $listening = { [bool](Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue) }' + NL +
+    '        if (-not (& $listening)) {' + NL +
+    '            $ErrorActionPreference = ''Continue''' + NL +
+    '            $users = @(quser 2>$null | Select-Object -Skip 1 | Where-Object { $_.Trim() })' + NL +
+    '            $ErrorActionPreference = ''Stop''' + NL +
+    '            if ($users) {' + NL +
+    '                Log "Remote Desktop: port 3389 opens after the next reboot (TermService not restarted, users logged on: $($users.Count))"' + NL +
+    '            } else {' + NL +
+    '                Restart-Service TermService -Force' + NL +
+    '                for ($i = 0; ($i -lt 10) -and -not (& $listening); $i++) { Start-Sleep -Seconds 1 }' + NL +
+    '                Log "Remote Desktop: TermService restarted, listening on 3389: $(& $listening)"' + NL +
+    '            }' + NL +
+    '        }' + NL +
+    '        Log "Remote Desktop enabled (NLA required, firewall group: $($rdpRules.Count) rule(s))"' + NL +
+    '    } catch {' + NL +
+    '        Log "Remote Desktop warning (non-fatal): $_"' + NL +
+    '    }' + NL +
+    '} else {' + NL +
+    '    Log ''Remote Desktop left as is (/EnableRdp=0)''' + NL +
     '}' + NL +
     '' + NL +
     '# Windows service (fatal if it fails)' + NL +
