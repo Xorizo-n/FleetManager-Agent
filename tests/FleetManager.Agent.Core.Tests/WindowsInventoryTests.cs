@@ -52,4 +52,41 @@ public sealed class WindowsInventoryTests
         Assert.DoesNotMatch("[А-Яа-яЁё]", first.OperatingSystem!);
         Assert.Equal(first.Fingerprint, second.Fingerprint);
     }
+    [Fact]
+    public void NetworkAdapters_areParsedForWakeOnLan()
+    {
+        const string json = "[" +
+            "{\"Name\":\"Ethernet\",\"Description\":\"Realtek Gaming 2.5GbE Family Controller\",\"MacAddress\":\"34-5A-60-BF-91-C7\",\"Status\":\"Up\",\"MediaType\":\"802.3\",\"Ipv4\":[\"10.152.5.66/25\"]}," +
+            "{\"Name\":\"Wi-Fi\",\"Description\":\"Intel Wi-Fi 6\",\"MacAddress\":\"AA-BB-CC-DD-EE-FF\",\"Status\":\"Disconnected\",\"MediaType\":\"Native 802.11\",\"Ipv4\":{\"value\":[],\"Count\":0}}," +
+            "{\"Name\":\"Bluetooth\",\"Description\":\"Bluetooth Device (PAN)\",\"MacAddress\":\"11-22-33-44-55-66\",\"Status\":\"Disconnected\",\"MediaType\":\"BlueTooth\",\"Ipv4\":[]}," +
+            "{\"Name\":\"Broken\",\"MacAddress\":\"\",\"Ipv4\":\"10.0.0.1/8\"}]";
+
+        var adapters = WindowsInventoryCollector.ParseNetworkAdapters(json);
+
+        Assert.Equal(2, adapters.Count);
+        Assert.Equal("34-5A-60-BF-91-C7", adapters[0].MacAddress);
+        Assert.Equal(new[] { "10.152.5.66/25" }, adapters[0].Ipv4);
+        Assert.Equal("802.3", adapters[0].MediaType);
+        Assert.Empty(adapters[1].Ipv4);
+    }
+
+    [Theory]
+    [InlineData("{\"Name\":\"Ethernet\",\"MacAddress\":\"34-5A-60-BF-91-C7\",\"Ipv4\":\"10.152.5.66/25\"}", 1)]
+    [InlineData("[]", 0)]
+    [InlineData("", 0)]
+    [InlineData("not json", 0)]
+    public void NetworkAdapters_tolerateSingleObjectsAndGarbage(string json, int expected)
+    {
+        Assert.Equal(expected, WindowsInventoryCollector.ParseNetworkAdapters(json).Count);
+    }
+
+    [Fact]
+    public async Task CollectHardware_reportsPhysicalAdaptersWithMac()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var hardware = await new WindowsInventoryCollector().CollectHardwareAsync(CancellationToken.None);
+
+        Assert.All(hardware.NetworkAdapters, a => Assert.Matches("^([0-9A-F]{2}-){5}[0-9A-F]{2}$", a.MacAddress));
+    }
 }

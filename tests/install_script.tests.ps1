@@ -200,4 +200,31 @@ if ($rdpBlock -notmatch "try \{[\s\S]*catch \{[\s\S]*Remote Desktop warning \(no
     throw 'The Remote Desktop step must be non-fatal.'
 }
 
+# Пробуждение по сети (кнопка «Разбудить» на сервере): проводные адаптеры будят ПК,
+# быстрый запуск выключен; адаптер не перезапускается — это оборвало бы SSH-сессию
+# удалённого обновления; /EnableWol=0 шаг пропускает.
+$wolBlock = [regex]::Match($iss, '# Wake-on-LAN for the server[\s\S]*?# Windows service').Value
+if (-not $wolBlock) {
+    throw 'Installer must contain the Wake-on-LAN block before the Windows service block.'
+}
+if ($iss -notmatch "ParamFlagDefaultOn\('EnableWol'\)") {
+    throw 'Wake-on-LAN must be prepared by default with /EnableWol=0 as the opt-out.'
+}
+foreach ($needle in @('MSPower_DeviceEnable', 'MSPower_DeviceWakeEnable', 'HiberbootEnabled -Value 0', "PhysicalMediaType -eq ''802.3''")) {
+    if (-not $wolBlock.Contains($needle)) {
+        throw "Wake-on-LAN block must contain: $needle"
+    }
+}
+foreach ($line in ($wolBlock -split "`n" | Where-Object { $_ -match 'Set-NetAdapter(PowerManagement|AdvancedProperty) ' })) {
+    if ($line -notmatch '-NoRestart') {
+        throw "Wake-on-LAN must not reset the network adapter (missing -NoRestart): $line"
+    }
+}
+if ($wolBlock -notmatch "try \{[\s\S]*catch \{[\s\S]*Wake-on-LAN warning \(non-fatal\)") {
+    throw 'The Wake-on-LAN step must be non-fatal.'
+}
+if ($apiClient -notmatch 'network_adapters\s*=') {
+    throw 'Heartbeat must send the network adapters (MAC for Wake-on-LAN).'
+}
+
 Write-Output 'INSTALL_SCRIPT_TESTS_OK'
