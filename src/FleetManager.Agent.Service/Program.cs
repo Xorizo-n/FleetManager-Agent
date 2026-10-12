@@ -8,5 +8,6 @@ builder.Services.AddWindowsService(options => options.ServiceName = AgentConfigu
 builder.Services.AddSingleton<AgentState>();
 builder.Services.AddSingleton<AgentLogger>();
 builder.Services.AddSingleton<IInventoryCollector, WindowsInventoryCollector>();
+builder.Services.AddSingleton<ServerRouteKeeper>();
 builder.Services.AddHostedService<AgentWorker>();
 await builder.Build().RunAsync();

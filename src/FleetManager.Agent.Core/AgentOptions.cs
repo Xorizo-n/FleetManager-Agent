@@ -14,6 +14,8 @@ public sealed class AgentOptions
     // но служба перезаписывает agent.json целиком — без свойства значение терялось бы.
     public string? SshSourceAddress { get; set; }
     public int SyncIntervalMinutes { get; set; } = 5;
+    // Маршрут /32 до сервера мимо полнотуннельного VPN (ServerRoute). false — не трогать маршруты.
+    public bool PinServerRoute { get; set; } = true;
 
     public static AgentOptions Load(string? dataDirectory = null)
     {

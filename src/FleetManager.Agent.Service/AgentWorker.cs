@@ -8,17 +8,19 @@ public sealed class AgentWorker : BackgroundService
     private readonly AgentState _state;
     private readonly AgentLogger _logger;
     private readonly IInventoryCollector _inventory;
+    private readonly ServerRouteKeeper _serverRoute;
     // The periodic loop and "sync" from Tray/Control may ask at the same time; the run
     // mutates _options and the state, so syncs are serialized.
     private readonly SemaphoreSlim _syncGate = new(1, 1);
     private AgentOptions _options;
     private bool _renameWaitLogged;
 
-    public AgentWorker(AgentState state, AgentLogger logger, IInventoryCollector inventory)
+    public AgentWorker(AgentState state, AgentLogger logger, IInventoryCollector inventory, ServerRouteKeeper serverRoute)
     {
         _state = state;
         _logger = logger;
         _inventory = inventory;
+        _serverRoute = serverRoute;
         _options = AgentOptions.Load(_state.DataDirectory);
     }
 
@@ -27,6 +29,7 @@ public sealed class AgentWorker : BackgroundService
         _options = AgentOptions.Load(_state.DataDirectory);
         _state.MarkRunning(_options.ServerUrl);
         _logger.Info("FleetManager Agent service started.");
+        _serverRoute.Start(() => _options);
 
         var pipeTask = RunPipeAsync(stoppingToken);
         await SyncOnceAsync(stoppingToken);
@@ -69,6 +72,8 @@ public sealed class AgentWorker : BackgroundService
                 ? null
                 : new HttpClient { BaseAddress = new Uri(AgentConfiguration.NormalizeServerUrl(_options.ServerUrl) + "/") };
             var api = client is null ? null : new FleetManagerApiClient(client, _logger);
+            // Before talking to the server: with a full-tunnel VPN up it must go over the LAN.
+            if (api is not null) await _serverRoute.EnsureAsync(cancellationToken);
             // Registration first: until it succeeds there is nowhere to send the inventory,
             // and collecting it on every one-minute retry would only load the PC.
             if (api is not null && !await EnsureRegistrationAsync(api, cancellationToken)) return;
@@ -80,6 +85,7 @@ public sealed class AgentWorker : BackgroundService
                 EnsureSshKeyInstalled();
                 var snapshot = new AgentSnapshot(_state.Status, hardware, software);
                 await api.SendHeartbeatAsync(snapshot, _options.AgentToken, _options.SshLogin, cancellationToken);
+                await _serverRoute.ConfirmPathAsync(cancellationToken);
                 var previousFingerprint = _state.Hardware?.Fingerprint;
                 if (!string.IsNullOrWhiteSpace(previousFingerprint) && previousFingerprint != hardware.Fingerprint && !string.IsNullOrWhiteSpace(_options.AgentToken))
                 {
