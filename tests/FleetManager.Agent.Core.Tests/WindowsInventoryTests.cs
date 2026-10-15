@@ -18,6 +18,74 @@ public sealed class WindowsInventoryTests
         Assert.Equal("{\"Name\":\"1С:Предприятие 8 «тест» ё\"}", output.Trim());
     }
 
+    [Fact]
+    public async Task RegistrySoftware_survivesAMalformedUninstallValue()
+    {
+        // Регрессия: NetBeans пишет NoModify как REG_DWORD из 8 байт, Get-ItemProperty по Uninstall\*
+        // падал с InvalidCastException, и с SU5-VM-SBX не приходило ни одной программы из реестра.
+        if (!OperatingSystem.IsWindows()) return;
+
+        var root = @"Software\FleetManagerAgentTests\" + Guid.NewGuid().ToString("N");
+        try
+        {
+            using (var good = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(root + @"\Uninstall\Good"))
+            {
+                good.SetValue("DisplayName", "Good App");
+                good.SetValue("DisplayVersion", "1.2.3");
+                good.SetValue("Publisher", "Fleet");
+            }
+            using (var broken = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(root + @"\Uninstall\Broken"))
+            {
+                broken.SetValue("DisplayName", "Broken App");
+                broken.SetValue("DisplayVersion", "25");
+                SetMalformedDword(broken, "NoModify");
+            }
+            var path = $"HKCU:\\{root}\\Uninstall";
+            var keys = $"'{path}'";
+
+            var old = await WindowsInventoryCollector.RunPowerShellAsync(
+                $"try {{ $null = Get-ItemProperty '{path}\\*' -ErrorAction SilentlyContinue; 'ok' }} catch {{ 'throws' }}", CancellationToken.None);
+            Assert.Equal("throws", old.Trim()); // тест действительно воспроизводит проблему
+
+            var output = await WindowsInventoryCollector.RunPowerShellAsync(
+                $"$keys = @({keys}); @({WindowsInventoryCollector.RegistrySoftwareScript}) | Sort-Object Name | ConvertTo-Json -Compress", CancellationToken.None);
+
+            using var document = System.Text.Json.JsonDocument.Parse(output);
+            var names = document.RootElement.EnumerateArray().Select(x => x.GetProperty("Name").GetString()).ToArray();
+            Assert.Equal(new[] { "Broken App", "Good App" }, names);
+            var good0 = document.RootElement.EnumerateArray().Single(x => x.GetProperty("Name").GetString() == "Good App");
+            Assert.Equal("1.2.3", good0.GetProperty("Version").GetString());
+            Assert.Equal("Fleet", good0.GetProperty("Publisher").GetString());
+            Assert.Equal("registry", good0.GetProperty("Source").GetString());
+        }
+        finally
+        {
+            Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(@"Software\FleetManagerAgentTests", throwOnMissingSubKey: false);
+        }
+    }
+
+    [Fact]
+    public void SoftwareScript_readsUninstallEntriesValueByValue()
+    {
+        Assert.DoesNotContain("Get-ItemProperty", WindowsInventoryCollector.SoftwareScript);
+        Assert.Contains("$keys = @(" + WindowsInventoryCollector.UninstallKeys + ")", WindowsInventoryCollector.SoftwareScript);
+        Assert.Contains(WindowsInventoryCollector.RegistrySoftwareScript, WindowsInventoryCollector.SoftwareScript);
+        foreach (var hive in new[] { @"HKLM:\Software\Microsoft", @"HKLM:\Software\Wow6432Node", @"HKCU:\Software\Microsoft" })
+            Assert.Contains(hive, WindowsInventoryCollector.UninstallKeys);
+    }
+
+    // RegistryKey.SetValue не даёт записать REG_DWORD не из 4 байт — так делает установщик NetBeans.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void SetMalformedDword(Microsoft.Win32.RegistryKey key, string name)
+    {
+        var data = new byte[] { 1, 0, 0, 0, 0x31, 0x02, 0, 0 };
+        var status = RegSetValueEx(key.Handle, name, 0, 4 /* REG_DWORD */, data, data.Length);
+        Assert.Equal(0, status);
+    }
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, EntryPoint = "RegSetValueExW")]
+    private static extern int RegSetValueEx(Microsoft.Win32.SafeHandles.SafeRegistryHandle key, string name, int reserved, int type, byte[] data, int size);
+
     [Theory]
     // На Windows 11 ProductName в реестре всё ещё «Windows 10 …», отличает сборка
     [InlineData("Windows 10 Pro", "26200", "Майкрософт Windows 11 Pro", "Microsoft Windows 11 Pro")]

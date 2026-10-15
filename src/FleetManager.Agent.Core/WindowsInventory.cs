@@ -124,20 +124,33 @@ public sealed class WindowsInventoryCollector : IInventoryCollector
         return name.StartsWith("Microsoft ", StringComparison.OrdinalIgnoreCase) ? name : "Microsoft " + name;
     }
 
-    public async Task<IReadOnlyList<SoftwareEntry>> CollectSoftwareAsync(CancellationToken cancellationToken)
-    {
-        // Registry uninstall keys cover MSI/EXE installers, while the AppX and package
-        // providers cover Store, winget and Chocolatey installations when available.
-        const string script = @"
+    internal const string UninstallKeys =
+        @"'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'";
+
+    // Программы из Uninstall-записей. Значения читаются по одному через RegistryKey.GetValue,
+    // а не Get-ItemProperty по маске: тот читает все значения всех записей, и одно чужое битое
+    // значение роняет весь вызов. Установщик NetBeans пишет NoModify как REG_DWORD из 8 байт,
+    // .NET отдаёт его как Int64, провайдер реестра PowerShell падает с InvalidCastException,
+    // и на таком ПК (SU5-VM-SBX) из реестра не попадало ни одной программы. Нечитаемая запись
+    // пропускается, остальные — нет. $keys — список путей PowerShell (подменяется в тестах).
+    internal const string RegistrySoftwareScript =
+        @"(Get-ChildItem $keys -ErrorAction SilentlyContinue | ForEach-Object { try { $name = [string]$_.GetValue('DisplayName'); if ($name) { [pscustomobject]@{ Name = $name; Version = [string]$_.GetValue('DisplayVersion'); Publisher = [string]$_.GetValue('Publisher'); Source = 'registry' } } } catch {} })";
+
+    // Registry uninstall keys cover MSI/EXE installers, while the AppX and package
+    // providers cover Store, winget and Chocolatey installations when available.
+    internal const string SoftwareScript = @"
 $items = @()
-$paths = @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*')
-$items += Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object DisplayName | Select-Object @{N='Name';E={$_.DisplayName}},@{N='Version';E={$_.DisplayVersion}},@{N='Publisher';E={$_.Publisher}},@{N='Source';E={'registry'}}
+$keys = @(" + UninstallKeys + @")
+$items += " + RegistrySoftwareScript + @"
 if (Get-Command Get-AppxPackage -ErrorAction SilentlyContinue) { $items += Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Select-Object @{N='Name';E={$_.Name}},@{N='Version';E={$_.Version.ToString()}},@{N='Publisher';E={$_.Publisher}},@{N='Source';E={'appx'}} }
 if (Get-Command choco -ErrorAction SilentlyContinue) { $items += choco list --local-only --limit-output 2>$null | ForEach-Object { $p=$_.Split('|'); if($p.Count -ge 2){ [pscustomobject]@{Name=$p[0];Version=$p[1];Publisher=$null;Source='chocolatey'} } } }
 if (Get-Command winget -ErrorAction SilentlyContinue) { $items += winget list --accept-source-agreements --disable-interactivity 2>$null | Select-Object -Skip 2 | ForEach-Object { if($_ -match '^(.+?)\s{2,}([^\s]+)\s{2,}(.+?)\s{2,}(.+)$'){ [pscustomobject]@{Name=$matches[1].Trim();Version=$matches[2].Trim();Publisher=$null;Source='winget'} } } }
 $items | Where-Object Name | Sort-Object Name,Version -Unique | ConvertTo-Json -Compress
 ";
-        var output = await RunPowerShellAsync(script, cancellationToken);
+
+    public async Task<IReadOnlyList<SoftwareEntry>> CollectSoftwareAsync(CancellationToken cancellationToken)
+    {
+        var output = await RunPowerShellAsync(SoftwareScript, cancellationToken);
         if (string.IsNullOrWhiteSpace(output)) return Array.Empty<SoftwareEntry>();
         try
         {
