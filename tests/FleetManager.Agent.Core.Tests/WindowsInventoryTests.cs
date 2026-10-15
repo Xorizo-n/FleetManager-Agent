@@ -71,6 +71,32 @@ public sealed class WindowsInventoryTests
     }
 
     [Theory]
+    [InlineData("1000000000", 1_000_000_000L)]
+    [InlineData("100000000", 100_000_000L)]
+    [InlineData("null", null)]
+    [InlineData("0", null)]
+    [InlineData("9223372036854775807", null)]
+    [InlineData("\"1 Gbps\"", null)]
+    public void NetworkAdapters_reportTheLinkSpeedOnlyWhenThereIsALink(string speed, long? expected)
+    {
+        var json = "{\"Name\":\"Ethernet\",\"MacAddress\":\"34-5A-60-BF-91-C7\",\"Ipv4\":[],\"Speed\":" + speed + "}";
+
+        Assert.Equal(expected, WindowsInventoryCollector.ParseNetworkAdapters(json).Single().LinkSpeedBps);
+    }
+
+    [Fact]
+    public void CollectDisks_reportsFixedDisksWithFreeSpace()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var disks = WindowsInventoryCollector.CollectDisks();
+
+        var system = Assert.Single(disks, d => string.Equals(d.Name, Path.GetPathRoot(Environment.SystemDirectory)!.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
+        Assert.Matches("^[A-Z]:$", system.Name);
+        Assert.InRange(system.FreeBytes, 0, system.SizeBytes);
+    }
+
+    [Theory]
     [InlineData("{\"Name\":\"Ethernet\",\"MacAddress\":\"34-5A-60-BF-91-C7\",\"Ipv4\":\"10.152.5.66/25\"}", 1)]
     [InlineData("[]", 0)]
     [InlineData("", 0)]

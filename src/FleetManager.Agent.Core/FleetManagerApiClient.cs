@@ -44,7 +44,16 @@ public sealed class FleetManagerApiClient
                     mac_address = adapter.MacAddress,
                     ipv4 = adapter.Ipv4,
                     status = adapter.Status,
-                    media_type = adapter.MediaType
+                    media_type = adapter.MediaType,
+                    link_speed_bps = adapter.LinkSpeedBps
+                }).ToArray(),
+                disks = snapshot.Hardware.Disks.Select(disk => new
+                {
+                    name = disk.Name,
+                    label = disk.Label,
+                    file_system = disk.FileSystem,
+                    size_bytes = disk.SizeBytes,
+                    free_bytes = disk.FreeBytes
                 }).ToArray()
             },
             software = snapshot.Software.Select(item => new

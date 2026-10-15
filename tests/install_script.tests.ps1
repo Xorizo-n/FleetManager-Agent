@@ -226,5 +226,8 @@ if ($wolBlock -notmatch "try \{[\s\S]*catch \{[\s\S]*Wake-on-LAN warning \(non-f
 if ($apiClient -notmatch 'network_adapters\s*=') {
     throw 'Heartbeat must send the network adapters (MAC for Wake-on-LAN).'
 }
+if ($apiClient -notmatch 'link_speed_bps\s*=' -or $apiClient -notmatch 'disks\s*=') {
+    throw 'Heartbeat must send the adapter link speed and the disk usage.'
+}
 
 Write-Output 'INSTALL_SCRIPT_TESTS_OK'
