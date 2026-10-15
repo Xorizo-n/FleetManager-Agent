@@ -31,14 +31,34 @@ public sealed class WindowsInventoryCollector : IInventoryCollector
             OperatingSystemName(GetString(os, "ProductName"), GetString(os, "CurrentBuildNumber"), GetString(os, "Caption")),
             GetString(cpu, "Name"), GetLong(computer, "TotalPhysicalMemory"), null);
         var adapters = ParseNetworkAdapters(await RunPowerShellAsync(NetworkAdaptersScript, cancellationToken));
-        return hardware with { Fingerprint = Fingerprint(hardware), NetworkAdapters = adapters };
+        return hardware with { Fingerprint = Fingerprint(hardware), NetworkAdapters = adapters, Disks = CollectDisks() };
     }
 
-    // Физические адаптеры с MAC и IPv4/префиксом. -InputObject — чтобы и один адаптер
+    /// <summary>Локальные несъёмные диски; флешки, сетевые и не готовые (BitLocker) пропускаются.</summary>
+    internal static IReadOnlyList<DiskInfo> CollectDisks()
+    {
+        var disks = new List<DiskInfo>();
+        foreach (var drive in DriveInfo.GetDrives())
+        {
+            try
+            {
+                if (drive.DriveType != DriveType.Fixed || !drive.IsReady || drive.TotalSize <= 0) continue;
+                disks.Add(new DiskInfo(
+                    drive.Name.TrimEnd('\\'), NullIfBlank(drive.VolumeLabel), NullIfBlank(drive.DriveFormat),
+                    drive.TotalSize, drive.TotalFreeSpace));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        return disks;
+    }
+
+    private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    // Физические адаптеры с MAC, IPv4/префиксом и скоростью линка (Speed, бит/с; без линка — пусто). -InputObject — чтобы и один адаптер
     // пришёл массивом.
     private const string NetworkAdaptersScript =
         "ConvertTo-Json -Compress -Depth 3 -InputObject @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object { " +
-        "[pscustomobject]@{ Name = $_.Name; Description = $_.InterfaceDescription; MacAddress = $_.MacAddress; Status = [string]$_.Status; MediaType = [string]$_.PhysicalMediaType; " +
+        "[pscustomobject]@{ Name = $_.Name; Description = $_.InterfaceDescription; MacAddress = $_.MacAddress; Status = [string]$_.Status; MediaType = [string]$_.PhysicalMediaType; Speed = $_.Speed; " +
         "Ipv4 = @(Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.IPAddress + '/' + $_.PrefixLength }) } })";
 
     /// <summary>
@@ -59,7 +79,7 @@ public sealed class WindowsInventoryCollector : IInventoryCollector
                 .Where(x => x.ValueKind == JsonValueKind.Object)
                 .Select(x => new NetworkAdapterInfo(
                     GetString(x, "Name"), GetString(x, "Description"), (GetString(x, "MacAddress") ?? string.Empty).Trim(),
-                    StringList(x, "Ipv4"), GetString(x, "Status"), GetString(x, "MediaType")))
+                    StringList(x, "Ipv4"), GetString(x, "Status"), GetString(x, "MediaType"), LinkSpeed(x)))
                 .Where(x => x.MacAddress.Length > 0 && !(x.MediaType ?? string.Empty).Contains("bluetooth", StringComparison.OrdinalIgnoreCase))
                 .ToArray();
         }
@@ -68,6 +88,11 @@ public sealed class WindowsInventoryCollector : IInventoryCollector
             return Array.Empty<NetworkAdapterInfo>();
         }
     }
+
+    // Без линка Speed пустой или 0; некоторые драйверы отдают «неизвестно» как Int64.MaxValue
+    private static long? LinkSpeed(JsonElement element) =>
+        element.TryGetProperty("Speed", out var value) && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt64(out var speed) && speed > 0 && speed < 1_000_000_000_000 ? speed : null;
 
     private static IReadOnlyList<string> StringList(JsonElement element, string name)
     {

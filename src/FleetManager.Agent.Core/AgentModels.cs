@@ -64,17 +64,34 @@ public sealed record HardwareSnapshot(
     /// В отпечаток железа не входят: USB-адаптер или док-станция давали бы ложные алерты.
     /// </summary>
     public IReadOnlyList<NetworkAdapterInfo> NetworkAdapters { get; init; } = Array.Empty<NetworkAdapterInfo>();
+
+    /// <summary>
+    /// Локальные несъёмные диски с заполненностью — сервер показывает их в карточке хоста.
+    /// В отпечаток железа не входят: свободное место меняется постоянно.
+    /// </summary>
+    public IReadOnlyList<DiskInfo> Disks { get; init; } = Array.Empty<DiskInfo>();
 }
 
 /// <param name="Ipv4">Адреса с длиной префикса: «10.152.5.56/25» — по ним сервер находит соседей по подсети.</param>
 /// <param name="MediaType">PhysicalMediaType: «802.3» — проводной, через него и будят.</param>
+/// <param name="LinkSpeedBps">Скорость, которую адаптер согласовал с портом, бит/с; null — нет линка.
+/// 100 Мбит/с на гигабитной сети обычно означает плохой кабель или порт.</param>
 public sealed record NetworkAdapterInfo(
     string? Name,
     string? Description,
     string MacAddress,
     IReadOnlyList<string> Ipv4,
     string? Status,
-    string? MediaType);
+    string? MediaType,
+    long? LinkSpeedBps = null);
+
+/// <param name="Name">Корень диска: «C:».</param>
+public sealed record DiskInfo(
+    string Name,
+    string? Label,
+    string? FileSystem,
+    long SizeBytes,
+    long FreeBytes);
 
 public sealed record SoftwareEntry(
     string Name,
