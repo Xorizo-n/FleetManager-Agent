@@ -80,10 +80,11 @@ public sealed class AgentWorker : BackgroundService
 
             var hardware = await _inventory.CollectHardwareAsync(cancellationToken);
             var software = await _inventory.CollectSoftwareAsync(cancellationToken);
+            var activation = await _inventory.CollectActivationAsync(cancellationToken);
             if (api is not null)
             {
                 EnsureSshKeyInstalled();
-                var snapshot = new AgentSnapshot(_state.Status, hardware, software);
+                var snapshot = new AgentSnapshot(_state.Status, hardware, software) { Activation = activation };
                 await api.SendHeartbeatAsync(snapshot, _options.AgentToken, _options.SshLogin, cancellationToken);
                 await _serverRoute.ConfirmPathAsync(cancellationToken);
                 var previousFingerprint = _state.Hardware?.Fingerprint;

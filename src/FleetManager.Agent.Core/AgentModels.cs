@@ -102,7 +102,11 @@ public sealed record SoftwareEntry(
 public sealed record AgentSnapshot(
     AgentStatus Status,
     HardwareSnapshot Hardware,
-    IReadOnlyList<SoftwareEntry> Software);
+    IReadOnlyList<SoftwareEntry> Software)
+{
+    /// <summary>Активация Windows и Office; null — не собрана, сервер оставляет прежние сведения.</summary>
+    public ActivationSnapshot? Activation { get; init; }
+}
 
 public sealed record AgentPipeRequest(string Command, string? Value = null);
 

@@ -14,6 +14,34 @@ public sealed class FleetManagerApiClient
         _logger = logger;
     }
 
+    internal static object? ActivationPayload(ActivationSnapshot? activation) => activation is null ? null : new
+    {
+        collected_at = activation.CollectedAt,
+        client_machine_id = activation.ClientMachineId,
+        kms_probe = activation.KmsProbe is { } probe
+            ? new { host = probe.Host, port = probe.Port, reachable = probe.Reachable, error = probe.Error }
+            : null,
+        products = activation.Products.Select(product => new
+        {
+            kind = product.Kind,
+            id = product.Id,
+            name = product.Name,
+            description = product.Description,
+            channel = product.Channel,
+            partial_product_key = product.PartialProductKey,
+            license_status = product.LicenseStatus,
+            status_reason = product.StatusReason,
+            grace_minutes = product.GraceMinutes,
+            kms_machine = product.KmsMachine,
+            kms_port = product.KmsPort,
+            discovered_kms_machine = product.DiscoveredKmsMachine,
+            discovered_kms_port = product.DiscoveredKmsPort,
+            last_request = product.LastRequest is { } request
+                ? new { at = request.At, kms = request.Kms, result = request.Result }
+                : null
+        }).ToArray()
+    };
+
     public async Task SendHeartbeatAsync(AgentSnapshot snapshot, string? token, string? sshLogin, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(_httpClient.BaseAddress?.ToString()))
@@ -62,7 +90,8 @@ public sealed class FleetManagerApiClient
                 version = item.Version,
                 publisher = item.Publisher,
                 source = item.Source
-            }).ToArray()
+            }).ToArray(),
+            activation = ActivationPayload(snapshot.Activation)
         };
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{AgentConfiguration.DefaultApiPath}/heartbeat")
         {

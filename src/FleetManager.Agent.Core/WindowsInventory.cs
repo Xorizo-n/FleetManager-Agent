@@ -9,10 +9,16 @@ public interface IInventoryCollector
 {
     Task<HardwareSnapshot> CollectHardwareAsync(CancellationToken cancellationToken);
     Task<IReadOnlyList<SoftwareEntry>> CollectSoftwareAsync(CancellationToken cancellationToken);
+    /// <summary>Активация Windows и Office; null — собрать не удалось.</summary>
+    Task<ActivationSnapshot?> CollectActivationAsync(CancellationToken cancellationToken);
 }
 
 public sealed class WindowsInventoryCollector : IInventoryCollector
 {
+    private readonly LicenseActivationCollector _activation = new();
+
+    public Task<ActivationSnapshot?> CollectActivationAsync(CancellationToken cancellationToken) => _activation.CollectAsync(cancellationToken);
+
     public async Task<HardwareSnapshot> CollectHardwareAsync(CancellationToken cancellationToken)
     {
         // Название ОС берётся из реестра, а не из Win32_OperatingSystem.Caption: Caption
