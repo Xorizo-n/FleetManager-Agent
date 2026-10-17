@@ -229,6 +229,9 @@ if ($apiClient -notmatch 'network_adapters\s*=') {
 if ($apiClient -notmatch 'link_speed_bps\s*=' -or $apiClient -notmatch 'disks\s*=') {
     throw 'Heartbeat must send the adapter link speed and the disk usage.'
 }
+if ($apiClient -notmatch 'components\s*=\s*ComponentsPayload') {
+    throw 'Heartbeat must send the workplace components (monitors, keyboards, mice, USB).'
+}
 if ($apiClient -notmatch 'activation\s*=\s*ActivationPayload') {
     throw 'Heartbeat must send the Windows/Office activation status.'
 }

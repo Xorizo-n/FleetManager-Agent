@@ -70,6 +70,12 @@ public sealed record HardwareSnapshot(
     /// В отпечаток железа не входят: свободное место меняется постоянно.
     /// </summary>
     public IReadOnlyList<DiskInfo> Disks { get; init; } = Array.Empty<DiskInfo>();
+
+    /// <summary>
+    /// Состав рабочего места: плата, BIOS, модули памяти, физические диски, видеокарты, мониторы,
+    /// клавиатуры, мыши и прочие USB-устройства; null — собрать не удалось. В отпечаток не входит.
+    /// </summary>
+    public HardwareComponents? Components { get; init; }
 }
 
 /// <param name="Ipv4">Адреса с длиной префикса: «10.152.5.56/25» — по ним сервер находит соседей по подсети.</param>
