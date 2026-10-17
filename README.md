@@ -26,7 +26,7 @@ dotnet publish src/FleetManager.Agent.Control/FleetManager.Agent.Control.csproj 
 
 Установка выполняется только через собранный Inno Setup EXE-установщик (см. ниже) — отдельного `install.ps1` в репозитории нет, вся логика установки встроена в `installer\FleetManagerAgent.iss`. Конфигурация и логи находятся в `%ProgramData%\FleetManagerAgent`.
 
-Сервис регистрируется через enrollment-токен и шлёт heartbeat (железо + ПО + версия агента + активация Windows и Office) на `/api/agent/heartbeat` сервера Fleet Manager. Активация собирается раз в час: состояние лицензий, последнее обращение к KMS из журнала и доступность порта KMS с ПК.
+Сервис регистрируется через enrollment-токен и шлёт heartbeat (железо и состав рабочего места: плата, память, диски, видеокарта, мониторы, клавиатура, мышь, USB-устройства + ПО + версия агента + активация Windows и Office) на `/api/agent/heartbeat` сервера Fleet Manager. Активация собирается раз в час: состояние лицензий, последнее обращение к KMS из журнала и доступность порта KMS с ПК.
 
 ## Установщик (Inno Setup)
 

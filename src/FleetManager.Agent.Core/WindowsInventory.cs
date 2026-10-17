@@ -37,7 +37,8 @@ public sealed class WindowsInventoryCollector : IInventoryCollector
             OperatingSystemName(GetString(os, "ProductName"), GetString(os, "CurrentBuildNumber"), GetString(os, "Caption")),
             GetString(cpu, "Name"), GetLong(computer, "TotalPhysicalMemory"), null);
         var adapters = ParseNetworkAdapters(await RunPowerShellAsync(NetworkAdaptersScript, cancellationToken));
-        return hardware with { Fingerprint = Fingerprint(hardware), NetworkAdapters = adapters, Disks = CollectDisks() };
+        var components = await HardwareComponentsCollector.CollectAsync(cancellationToken);
+        return hardware with { Fingerprint = Fingerprint(hardware), NetworkAdapters = adapters, Disks = CollectDisks(), Components = components };
     }
 
     /// <summary>Локальные несъёмные диски; флешки, сетевые и не готовые (BitLocker) пропускаются.</summary>

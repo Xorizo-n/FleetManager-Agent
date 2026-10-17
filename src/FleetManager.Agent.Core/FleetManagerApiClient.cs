@@ -14,6 +14,52 @@ public sealed class FleetManagerApiClient
         _logger = logger;
     }
 
+    internal static object? ComponentsPayload(HardwareComponents? components) => components is null ? null : new
+    {
+        baseboard = components.Baseboard is { } board
+            ? new { manufacturer = board.Manufacturer, product = board.Product, serial_number = board.SerialNumber }
+            : null,
+        bios_version = components.BiosVersion,
+        memory_modules = components.MemoryModules.Select(m => new
+        {
+            slot = m.Slot,
+            manufacturer = m.Manufacturer,
+            part_number = m.PartNumber,
+            serial_number = m.SerialNumber,
+            capacity_bytes = m.CapacityBytes,
+            speed_mhz = m.SpeedMhz
+        }).ToArray(),
+        physical_disks = components.PhysicalDisks.Select(d => new
+        {
+            model = d.Model,
+            serial_number = d.SerialNumber,
+            bus_type = d.BusType,
+            size_bytes = d.SizeBytes
+        }).ToArray(),
+        gpus = components.Gpus.Select(g => new { name = g.Name, driver_version = g.DriverVersion, pnp_id = g.PnpId }).ToArray(),
+        monitors = components.Monitors.Select(m => new
+        {
+            manufacturer = m.Manufacturer,
+            model = m.Model,
+            serial_number = m.SerialNumber,
+            product_code = m.ProductCode,
+            year = m.Year,
+            connection = m.Connection
+        }).ToArray(),
+        input_devices = components.InputDevices.Select(Peripheral).ToArray(),
+        usb_devices = components.UsbDevices.Select(Peripheral).ToArray()
+    };
+
+    private static object Peripheral(PeripheralInfo device) => new
+    {
+        kind = device.Kind,
+        name = device.Name,
+        vid = device.Vid,
+        pid = device.Pid,
+        serial = device.Serial,
+        device_class = device.DeviceClass
+    };
+
     internal static object? ActivationPayload(ActivationSnapshot? activation) => activation is null ? null : new
     {
         collected_at = activation.CollectedAt,
@@ -82,7 +128,8 @@ public sealed class FleetManagerApiClient
                     file_system = disk.FileSystem,
                     size_bytes = disk.SizeBytes,
                     free_bytes = disk.FreeBytes
-                }).ToArray()
+                }).ToArray(),
+                components = ComponentsPayload(snapshot.Hardware.Components)
             },
             software = snapshot.Software.Select(item => new
             {
