@@ -674,27 +674,70 @@ begin
     '    Log "Run key warning: $_"' + NL +
     '}' + NL +
     '' + NL +
-    '# Launch Tray in the interactive user session (not the elevated installer context),' + NL +
-    '# detached via cmd /c start rather than ShellExecute so it does not inherit this' + NL +
-    '# script''s own stdio handles: on a remote update this whole install runs over a' + NL +
-    '# non-interactive SSH exec channel, and Tray keeps running indefinitely, so if it' + NL +
-    '# inherits that channel''s stdout/stderr pipe, sshd never sees EOF and the SSH' + NL +
-    '# client (Ansible on the FleetManager server) hangs waiting for the command to' + NL +
-    '# return even though installation already finished — confirmed on a production' + NL +
-    '# host where the service was already running the new version while the update' + NL +
-    '# task was still stuck "running" minutes later. Start-Process -RedirectStandard*' + NL +
-    '# was tried first but rejects NUL (relative NUL 404s; \\.\NUL collides because' + NL +
-    '# stdout/stderr can''t redirect to the same resolved path) — cmd /c start sidesteps' + NL +
-    '# all of that by detaching the child the same way any other backgrounded cmd job does.' + NL +
+    '# Launch Tray in every logged-on user session (the ssInstall step killed the old' + NL +
+    '# ones in all sessions). Not in the installer''s own context: a remote update runs' + NL +
+    '# this script via WMI from the SSH session, i.e. in service session 0 as the SSH' + NL +
+    '# user - confirmed on SU5-VM-SBX and SU5-K104-W09, where the only tray left after' + NL +
+    '# an update ran in session 0 and the logged-on users had none until their next' + NL +
+    '# logon (so the open desktop missed wallpaper changes, which the tray applies).' + NL +
+    '# A one-off scheduled task with the Users group as principal and an interactive' + NL +
+    '# token starts one instance per logged-on member (local and domain accounts,' + NL +
+    '# disconnected sessions too) as that user, non-elevated, and never in session 0;' + NL +
+    '# deleting the task afterwards leaves the started trays running. A second tray in' + NL +
+    '# a session that already has one exits on the Local\ mutex.' + NL +
+    '#' + NL +
+    '# Tray keeps running indefinitely, so it must not inherit this script''s stdio: on' + NL +
+    '# a remote update the install runs over a non-interactive SSH exec channel, and if' + NL +
+    '# Tray holds that channel''s stdout/stderr pipe, sshd never sees EOF and the SSH' + NL +
+    '# client (Ansible on the FleetManager server) hangs although installation already' + NL +
+    '# finished - confirmed on a production host. The task''s tray is started by the' + NL +
+    '# Task Scheduler service, so it inherits nothing from here. The fallback (Task' + NL +
+    '# Scheduler unavailable, local install by a logged-on user) detaches via cmd /c' + NL +
+    '# start for the same reason: Start-Process -RedirectStandard* rejects NUL, and' + NL +
+    '# ShellExecute COM inherits this script''s handles.' + NL +
     'if ($deferStart) {' + NL +
     '    Log ''Tray not launched (/DeferStart): it starts at the next logon''' + NL +
     '} else {' + NL +
-    '    try {' + NL +
-    '        Start-Process -FilePath ''cmd.exe'' -WorkingDirectory $installRoot -WindowStyle Hidden ' +
-             '-ArgumentList "/c start `"`" /B `"$trayExe`""' + NL +
-    '        Log ''Tray launched''' + NL +
-    '    } catch {' + NL +
-    '        Log "Tray launch warning (starts at next logon): $_"' + NL +
+    '    $userSessions = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 } | Select-Object -ExpandProperty SessionId -Unique | Sort-Object)' + NL +
+    '    if (-not $userSessions) {' + NL +
+    '        Log ''Tray not launched: nobody is logged on, it starts at the next logon''' + NL +
+    '    } else {' + NL +
+    '        $trayTask = ''FleetManager-Agent-tray-launch''' + NL +
+    '        try {' + NL +
+    '            $action = New-ScheduledTaskAction -Execute $trayExe -WorkingDirectory $installRoot' + NL +
+    '            $principal = New-ScheduledTaskPrincipal -GroupId ''S-1-5-32-545'' -RunLevel Limited' + NL +
+    '            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances Parallel -Priority 5' + NL +
+    '            Register-ScheduledTask -TaskName $trayTask -Action $action -Principal $principal -Settings $settings -Force | Out-Null' + NL +
+    '            try {' + NL +
+    '                Start-ScheduledTask -TaskName $trayTask' + NL +
+    '                $deadline = (Get-Date).AddSeconds(20)' + NL +
+    '                do {' + NL +
+    '                    Start-Sleep -Milliseconds 500' + NL +
+    '                    $traySessions = @(Get-Process -Name FleetManager.Agent.Tray -ErrorAction SilentlyContinue | Select-Object -ExpandProperty SessionId)' + NL +
+    '                    $missing = @($userSessions | Where-Object { $traySessions -notcontains $_ })' + NL +
+    '                } while ($missing -and (Get-Date) -lt $deadline)' + NL +
+    '            } finally {' + NL +
+    '                Unregister-ScheduledTask -TaskName $trayTask -Confirm:$false -ErrorAction SilentlyContinue' + NL +
+    '            }' + NL +
+    '            if ($missing) {' + NL +
+    '                Log "Tray launch warning: no tray in session(s) $($missing -join '', '') yet, it starts there at the next logon"' + NL +
+    '            } else {' + NL +
+    '                Log "Tray launched in user session(s) $($userSessions -join '', '')"' + NL +
+    '            }' + NL +
+    '        } catch {' + NL +
+    '            Log "Tray launch via Task Scheduler failed: $_"' + NL +
+    '            if ((Get-Process -Id $PID).SessionId -ne 0) {' + NL +
+    '                try {' + NL +
+    '                    Start-Process -FilePath ''cmd.exe'' -WorkingDirectory $installRoot -WindowStyle Hidden ' +
+                         '-ArgumentList "/c start `"`" /B `"$trayExe`""' + NL +
+    '                    Log ''Tray launched in the installer session''' + NL +
+    '                } catch {' + NL +
+    '                    Log "Tray launch warning (starts at next logon): $_"' + NL +
+    '                }' + NL +
+    '            } else {' + NL +
+    '                Log ''Tray not launched (installer runs in session 0): it starts at the next logon''' + NL +
+    '            }' + NL +
+    '        }' + NL +
     '    }' + NL +
     '}' + NL +
     '' + NL +
