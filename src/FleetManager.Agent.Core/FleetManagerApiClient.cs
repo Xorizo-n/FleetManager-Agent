@@ -88,7 +88,67 @@ public sealed class FleetManagerApiClient
         }).ToArray()
     };
 
-    public async Task SendHeartbeatAsync(AgentSnapshot snapshot, string? token, string? sshLogin, CancellationToken cancellationToken)
+    internal static object? WallpaperPayload(WallpaperReport? report) => report is null ? null : new
+    {
+        desktop = Current(report.Desktop),
+        lock_screen = Current(report.LockScreen),
+        applied_desktop_id = report.AppliedDesktopId,
+        applied_lock_screen_id = report.AppliedLockScreenId,
+        error = report.Error,
+        thumbnails = report.Thumbnails.Select(t => new { sha256 = t.Sha256, jpeg_base64 = t.JpegBase64 }).ToArray()
+    };
+
+    private static object? Current(CurrentWallpaper? current) =>
+        current is null ? null : new { path = current.Path, sha256 = current.Sha256, source = current.Source };
+
+    /// <summary>
+    /// Назначенные обои из ответа на heartbeat. null — сервер о них не сообщил (старая версия сервера):
+    /// тогда агент ничего не меняет. Поле desktop/lock_screen = null — обоями сервер не управляет.
+    /// </summary>
+    internal static DesiredWallpapers? ParseDesiredWallpapers(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("wallpaper", out var wallpaper) || wallpaper.ValueKind != JsonValueKind.Object) return null;
+            var thumbnails = wallpaper.TryGetProperty("thumbnails", out var t) && t.ValueKind == JsonValueKind.Array
+                ? t.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).Take(8).ToArray()
+                : Array.Empty<string>();
+            return new DesiredWallpapers(WallpaperImageOf(wallpaper, "desktop"), WallpaperImageOf(wallpaper, "lock_screen"), thumbnails);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static WallpaperImage? WallpaperImageOf(JsonElement parent, string name)
+    {
+        if (!parent.TryGetProperty(name, out var e) || e.ValueKind != JsonValueKind.Object) return null;
+        var id = e.TryGetProperty("id", out var i) && i.ValueKind == JsonValueKind.String ? i.GetString() : null;
+        var sha = e.TryGetProperty("sha256", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() : null;
+        if (string.IsNullOrWhiteSpace(id) || sha is not { Length: 64 } || !sha.All(Uri.IsHexDigit)) return null;
+        var style = e.TryGetProperty("style", out var st) && st.ValueKind == JsonValueKind.String && st.GetString() is { Length: > 0 and <= 2 } value && value.All(char.IsDigit) ? value : "4";
+        var fileName = e.TryGetProperty("file_name", out var f) && f.ValueKind == JsonValueKind.String ? f.GetString() : null;
+        return new WallpaperImage(id, sha.ToLowerInvariant(), fileName, style);
+    }
+
+    /// <summary>Скачивает изображение каталога своим agent-токеном.</summary>
+    public async Task DownloadWallpaperAsync(string id, string token, string path, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{AgentConfiguration.DefaultApiPath}/wallpapers/{Uri.EscapeDataString(id)}");
+        request.Headers.Authorization = new("Bearer", token);
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException($"Fleet Manager returned {(int)response.StatusCode} for wallpaper {id}", null, response.StatusCode);
+        await using var file = File.Create(path);
+        await response.Content.CopyToAsync(file, cancellationToken);
+    }
+
+    /// <returns>Назначенные обои из ответа сервера; null — сервер о них не сообщил.</returns>
+    public async Task<DesiredWallpapers?> SendHeartbeatAsync(AgentSnapshot snapshot, string? token, string? sshLogin, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(_httpClient.BaseAddress?.ToString()))
             throw new InvalidOperationException("Fleet Manager server URL is not configured.");
@@ -138,7 +198,8 @@ public sealed class FleetManagerApiClient
                 publisher = item.Publisher,
                 source = item.Source
             }).ToArray(),
-            activation = ActivationPayload(snapshot.Activation)
+            activation = ActivationPayload(snapshot.Activation),
+            wallpaper = WallpaperPayload(snapshot.Wallpaper)
         };
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{AgentConfiguration.DefaultApiPath}/heartbeat")
         {
@@ -152,6 +213,7 @@ public sealed class FleetManagerApiClient
             throw new HttpRequestException($"Fleet Manager returned {(int)response.StatusCode}: {body}", null, response.StatusCode);
         }
         _logger.Info("Heartbeat and inventory uploaded successfully.");
+        return ParseDesiredWallpapers(await response.Content.ReadAsStringAsync(cancellationToken));
     }
 
     public async Task<AgentRegistrationResult> RegisterAsync(string enrollmentToken, string machineId, string hostname, string? sshLogin, CancellationToken cancellationToken)

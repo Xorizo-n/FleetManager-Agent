@@ -38,6 +38,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly TrayIconSet _icons = new();
     private readonly SynchronizationContext _ui;
     private AgentStatus? _status;
+    // Ревизия обоев, которую трей уже видел; первая не применяется — при входе их ставит сама политика
+    private string? _wallpaperRevision;
+    private bool _wallpaperRevisionKnown;
     private StatusSummary _summary;
     private bool _refreshing;
     private bool _syncing;
@@ -89,12 +92,27 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             _status = await _pipe.TryGetStatusAsync(StatusTimeout);
             _lastRefresh = DateTime.UtcNow;
+            RefreshWallpaperIfChanged(_status);
             if (!_syncing) ShowStatus(AgentStatusPresenter.Describe(_status, DateTimeOffset.Now));
         }
         finally
         {
             _refreshing = false;
         }
+    }
+
+    private void RefreshWallpaperIfChanged(AgentStatus? status)
+    {
+        if (status is null) return;
+        if (!_wallpaperRevisionKnown)
+        {
+            _wallpaperRevision = status.WallpaperRevision;
+            _wallpaperRevisionKnown = true;
+            return;
+        }
+        if (status.WallpaperRevision == _wallpaperRevision) return;
+        _wallpaperRevision = status.WallpaperRevision;
+        WallpaperRefresher.Apply();
     }
 
     private void ShowStatus(StatusSummary summary)
@@ -213,5 +231,40 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _menu.Dispose();
         _icons.Dispose();
         base.ExitThreadCore();
+    }
+}
+
+/// <summary>
+/// Служба (SYSTEM) меняет обои через политику, но открытый рабочий стол перечитывает их только
+/// при входе. Трей работает в сеансе пользователя и применяет их сразу: путь — из политики
+/// пользователя, а если служба её убрала — собственные обои пользователя.
+/// </summary>
+internal static class WallpaperRefresher
+{
+    private const uint SpiSetDeskWallpaper = 0x0014;
+    // Только оповестить, без записи в профиль: собственные обои пользователя остаются прежними
+    private const uint SpifSendChange = 0x02;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SystemParametersInfo(uint action, uint param, string value, uint flags);
+
+    public static void Apply()
+    {
+        try
+        {
+            string? path;
+            using (var policy = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Policies\System"))
+                path = policy?.GetValue("Wallpaper") as string;
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                using var desktop = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop");
+                path = desktop?.GetValue("Wallpaper") as string;
+            }
+            if (!string.IsNullOrWhiteSpace(path)) SystemParametersInfo(SpiSetDeskWallpaper, 0, path, SpifSendChange);
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException)
+        {
+            // Не получилось — обои обновятся при следующем входе
+        }
     }
 }

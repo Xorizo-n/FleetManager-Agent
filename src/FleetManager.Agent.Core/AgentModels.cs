@@ -48,7 +48,8 @@ public sealed record AgentStatus(
     AgentIssue Issue = AgentIssue.None,
     bool IsSyncing = false,
     DateTimeOffset? NextSyncAt = null,
-    string? AgentVersion = null);
+    string? AgentVersion = null,
+    string? WallpaperRevision = null);
 
 public sealed record HardwareSnapshot(
     string? Manufacturer,
@@ -112,6 +113,9 @@ public sealed record AgentSnapshot(
 {
     /// <summary>Активация Windows и Office; null — не собрана, сервер оставляет прежние сведения.</summary>
     public ActivationSnapshot? Activation { get; init; }
+
+    /// <summary>Обои рабочего стола и экрана блокировки; null — не собраны.</summary>
+    public WallpaperReport? Wallpaper { get; init; }
 }
 
 public sealed record AgentPipeRequest(string Command, string? Value = null);
