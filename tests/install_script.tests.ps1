@@ -138,6 +138,29 @@ if ($iss -notmatch 'if CurStep = ssInstall[\s\S]{0,2400}Exit;\s*end;[\s\S]{0,50}
 if (-not $iss.Contains('/c start `"`" /B `"$trayExe`""')) {
     throw 'Tray must be launched via cmd /c start (detached, non-inherited stdio) — otherwise a remote update over SSH hangs waiting for Tray (which never exits) to release the channel.'
 }
+# Удалённое обновление запускает установщик через WMI из SSH-сессии, то есть в
+# служебном сеансе 0: трей, запущенный «в своём контексте», оказывался там, а у
+# вошедших пользователей пропадал до следующего входа (SU5-VM-SBX, SU5-K104-W09),
+# и открытый рабочий стол не получал обои. Трей запускается в каждом сеансе
+# вошедшего пользователя разовой задачей планировщика с группой Users.
+$trayBlock = [regex]::Match($iss, '# Launch Tray in every logged-on user session[\s\S]*?# /ResetSshHostKeys').Value
+if (-not $trayBlock) {
+    throw 'Installer must contain the tray launch block before the /ResetSshHostKeys block.'
+}
+if ($trayBlock -notmatch 'Get-Process -Name explorer[^\r\n]*SessionId -ne 0') {
+    throw 'The tray must be launched only for logged-on user sessions (explorer), never for session 0.'
+}
+if ($trayBlock -notmatch 'New-ScheduledTaskPrincipal -GroupId ''''S-1-5-32-545'''' -RunLevel Limited' -or
+    $trayBlock -notmatch 'Start-ScheduledTask -TaskName \$trayTask' -or
+    $trayBlock -notmatch 'finally \{[\s\S]{0,200}Unregister-ScheduledTask -TaskName \$trayTask') {
+    throw 'The tray must be started in user sessions by a one-off Users-group scheduled task that is deleted afterwards.'
+}
+if ($trayBlock -notmatch 'New-ScheduledTaskSettingsSet[^\r\n]*-AllowStartIfOnBatteries[^\r\n]*-ExecutionTimeLimit \(\[TimeSpan\]::Zero\)[^\r\n]*-MultipleInstances Parallel') {
+    throw 'The tray task must start on battery, have no time limit and run one instance per session.'
+}
+if ($trayBlock -notmatch '\(Get-Process -Id \$PID\)\.SessionId -ne 0\) \{[\s\S]{0,300}/c start') {
+    throw 'The cmd /c start fallback must never launch the tray in session 0.'
+}
 if ($iss.Contains('$sh = New-Object -ComObject Shell.Application')) {
     throw 'Tray must not be launched via ShellExecute COM — its stdio inherits this script''s handles, which is what caused the hang cmd /c start fixes.'
 }
