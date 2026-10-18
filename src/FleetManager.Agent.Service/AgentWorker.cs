@@ -9,6 +9,7 @@ public sealed class AgentWorker : BackgroundService
     private readonly AgentLogger _logger;
     private readonly IInventoryCollector _inventory;
     private readonly ServerRouteKeeper _serverRoute;
+    private readonly WallpaperManager _wallpapers;
     // The periodic loop and "sync" from Tray/Control may ask at the same time; the run
     // mutates _options and the state, so syncs are serialized.
     private readonly SemaphoreSlim _syncGate = new(1, 1);
@@ -22,6 +23,8 @@ public sealed class AgentWorker : BackgroundService
         _inventory = inventory;
         _serverRoute = serverRoute;
         _options = AgentOptions.Load(_state.DataDirectory);
+        _wallpapers = new WallpaperManager(_state.DataDirectory, logger);
+        _state.SetWallpaperRevision(_wallpapers.DesktopRevision);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -84,8 +87,16 @@ public sealed class AgentWorker : BackgroundService
             if (api is not null)
             {
                 EnsureSshKeyInstalled();
-                var snapshot = new AgentSnapshot(_state.Status, hardware, software) { Activation = activation };
-                await api.SendHeartbeatAsync(snapshot, _options.AgentToken, _options.SshLogin, cancellationToken);
+                var wallpaper = await _wallpapers.ReportAsync(cancellationToken);
+                var snapshot = new AgentSnapshot(_state.Status, hardware, software) { Activation = activation, Wallpaper = wallpaper };
+                var desired = await api.SendHeartbeatAsync(snapshot, _options.AgentToken, _options.SshLogin, cancellationToken);
+                // Назначенные сервером обои применяются сразу; что получилось — уйдёт в следующем heartbeat
+                if (desired is not null && !string.IsNullOrWhiteSpace(_options.AgentToken))
+                {
+                    var token = _options.AgentToken;
+                    await _wallpapers.ApplyAsync(desired, (id, path, ct) => api.DownloadWallpaperAsync(id, token, path, ct), cancellationToken);
+                    _state.SetWallpaperRevision(_wallpapers.DesktopRevision);
+                }
                 await _serverRoute.ConfirmPathAsync(cancellationToken);
                 var previousFingerprint = _state.Hardware?.Fingerprint;
                 if (!string.IsNullOrWhiteSpace(previousFingerprint) && previousFingerprint != hardware.Fingerprint && !string.IsNullOrWhiteSpace(_options.AgentToken))

@@ -88,6 +88,9 @@ public sealed class AgentState
         }
     }
 
+    /// <summary>Трей обновляет обои открытого рабочего стола, когда ревизия меняется.</summary>
+    public void SetWallpaperRevision(string? revision) { lock (_gate) _status = _status with { WallpaperRevision = revision }; }
+
     public void MarkStopping() { lock (_gate) _status = _status with { State = AgentLifecycleState.Stopping }; }
     public void MarkOffline() { lock (_gate) _status = _status with { State = AgentLifecycleState.Offline }; }
 }
