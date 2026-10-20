@@ -259,4 +259,35 @@ if ($apiClient -notmatch 'activation\s*=\s*ActivationPayload') {
     throw 'Heartbeat must send the Windows/Office activation status.'
 }
 
+# Служба поднимается сама: перезапуск после сбоя и повторный запуск после
+# загрузки — первый старт после установки с /DeferStart не укладывался в 30 с
+# SCM (7009/7000 на SU5-F*), а действия при сбое на таймаут запуска не срабатывают.
+$serviceBlock = [regex]::Match($iss, '# Windows service \(fatal if it fails\)[\s\S]*?# Tray autorun registry key').Value
+if (-not $serviceBlock) {
+    throw 'Installer must contain the Windows service block before the tray autorun block.'
+}
+foreach ($needle in @('sc.exe failure FleetManagerAgent reset= 86400 actions= restart/', 'sc.exe failureflag FleetManagerAgent 1')) {
+    if (-not $serviceBlock.Contains($needle)) {
+        throw "Service block must set recovery actions: $needle"
+    }
+}
+$retryBlock = [regex]::Match($serviceBlock, '# Service start retry after boot[\s\S]*').Value
+if (-not $retryBlock) {
+    throw 'Installer must register the service start retry task after creating the service.'
+}
+foreach ($needle in @('New-ScheduledTaskTrigger -AtStartup', "-Argument ''start FleetManagerAgent''", "-UserId ''S-1-5-18''", "-TaskName ''FleetManager-Agent-start-retry''")) {
+    if (-not $retryBlock.Contains($needle)) {
+        throw "Start retry block must contain: $needle"
+    }
+}
+if ($retryBlock -notmatch "try \{[\s\S]*catch \{[\s\S]*Start retry task warning \(non-fatal\)") {
+    throw 'The start retry step must be non-fatal.'
+}
+$uninstallBlock = [regex]::Match($iss, 'FleetManager Agent uninstall script started[\s\S]*Uninstall script completed').Value
+foreach ($script in @($uninstallBlock, $uninstaller)) {
+    if ($script -notmatch "Unregister-ScheduledTask -TaskName '{1,2}FleetManager-Agent-start-retry'{1,2}") {
+        throw 'Uninstall must remove the service start retry task.'
+    }
+}
+
 Write-Output 'INSTALL_SCRIPT_TESTS_OK'

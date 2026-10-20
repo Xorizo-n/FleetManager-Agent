@@ -655,6 +655,9 @@ begin
     '    $startType = if ($deferStart) { ''delayed-auto'' } else { ''auto'' }' + NL +
     '    & sc.exe create FleetManagerAgent binPath= "`"$serviceExe`"" start= $startType obj= LocalSystem DisplayName= "FleetManager Agent" | Out-Null' + NL +
     '    & sc.exe description FleetManagerAgent "Fleet Manager inventory and heartbeat agent" | Out-Null' + NL +
+    '    # Recovery: restart 1 min after a crash or an error stop, failure count reset daily.' + NL +
+    '    & sc.exe failure FleetManagerAgent reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null' + NL +
+    '    & sc.exe failureflag FleetManagerAgent 1 | Out-Null' + NL +
     '    if ($deferStart) {' + NL +
     '        Log ''Service created; it starts after the next reboot (/DeferStart)''' + NL +
     '    } else {' + NL +
@@ -664,6 +667,22 @@ begin
     '} catch {' + NL +
     '    Log "Service FAILED: $_"' + NL +
     '    throw' + NL +
+    '}' + NL +
+    '' + NL +
+    '# Service start retry after boot. The first start after a fresh install loads' + NL +
+    '# hundreds of new files that Defender scans, and right after the domain join' + NL +
+    '# it can miss the SCM''s 30 s window (7009/7000 on SU5-F*: the service stayed' + NL +
+    '# stopped until started by hand). Recovery actions do not cover a start timeout,' + NL +
+    '# so SYSTEM runs "sc start" 5 and 10 min after boot; a running service ignores it.' + NL +
+    'try {' + NL +
+    '    $triggers = @(''PT5M'', ''PT10M'') | ForEach-Object { $t = New-ScheduledTaskTrigger -AtStartup; $t.Delay = $_; $t }' + NL +
+    '    $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\sc.exe" -Argument ''start FleetManagerAgent''' + NL +
+    '    $principal = New-ScheduledTaskPrincipal -UserId ''S-1-5-18'' -LogonType ServiceAccount -RunLevel Highest' + NL +
+    '    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)' + NL +
+    '    Register-ScheduledTask -TaskName ''FleetManager-Agent-start-retry'' -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Force | Out-Null' + NL +
+    '    Log ''Start retry task registered (5 and 10 min after boot)''' + NL +
+    '} catch {' + NL +
+    '    Log "Start retry task warning (non-fatal): $_"' + NL +
     '}' + NL +
     '' + NL +
     '# Tray autorun registry key' + NL +
@@ -832,6 +851,7 @@ begin
       '}' + NL +
       '& sc.exe delete FleetManagerAgent | Out-Null' + NL +
       'Log ''Service deleted''' + NL +
+      'Unregister-ScheduledTask -TaskName ''FleetManager-Agent-start-retry'' -Confirm:$false -ErrorAction SilentlyContinue' + NL +
       '' + NL +
       '# Remote server cleanup' + NL +
       '$config = $null' + NL +
