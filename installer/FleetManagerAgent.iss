@@ -661,19 +661,36 @@ begin
     '    if ($deferStart) {' + NL +
     '        Log ''Service created; it starts after the next reboot (/DeferStart)''' + NL +
     '    } else {' + NL +
-    '        & sc.exe start FleetManagerAgent | Out-Null' + NL +
-    '        Log ''Service created and started''' + NL +
+    '        # With Smart App Control in evaluation mode (SU5-F*: Core Ultra 9 laptops) the' + NL +
+    '        # first start of freshly written binaries misses the SCM''s 30 s window' + NL +
+    '        # (7009), on upgrades too; the second start takes 2 s. So retry.' + NL +
+    '        $status = ''Stopped''' + NL +
+    '        for ($attempt = 1; $attempt -le 3 -and $status -ne ''Running''; $attempt++) {' + NL +
+    '            & sc.exe start FleetManagerAgent | Out-Null' + NL +
+    '            $deadline = (Get-Date).AddSeconds(60)' + NL +
+    '            do {' + NL +
+    '                Start-Sleep -Seconds 1' + NL +
+    '                $status = [string](Get-Service FleetManagerAgent).Status' + NL +
+    '            } while ($status -eq ''StartPending'' -and (Get-Date) -lt $deadline)' + NL +
+    '            if ($status -ne ''Running'') { Log "Service start attempt $attempt failed: $status" }' + NL +
+    '        }' + NL +
+    '        if ($status -eq ''Running'') {' + NL +
+    '            Log ''Service created and started''' + NL +
+    '        } else {' + NL +
+    '            Log "Service created but not running ($status); the start retry task starts it after the next boot"' + NL +
+    '        }' + NL +
     '    }' + NL +
     '} catch {' + NL +
     '    Log "Service FAILED: $_"' + NL +
     '    throw' + NL +
     '}' + NL +
     '' + NL +
-    '# Service start retry after boot. The first start after a fresh install loads' + NL +
-    '# hundreds of new files that Defender scans, and right after the domain join' + NL +
-    '# it can miss the SCM''s 30 s window (7009/7000 on SU5-F*: the service stayed' + NL +
-    '# stopped until started by hand). Recovery actions do not cover a start timeout,' + NL +
-    '# so SYSTEM runs "sc start" 5 and 10 min after boot; a running service ignores it.' + NL +
+    '# Service start retry after boot. The first start of freshly written binaries can' + NL +
+    '# miss the SCM''s 30 s window (7009/7000 on SU5-F*, where Smart App Control is in' + NL +
+    '# evaluation mode): with /DeferStart that start is the boot after the install, and' + NL +
+    '# the service stayed stopped until started by hand. Recovery actions do not cover' + NL +
+    '# a start timeout, so SYSTEM runs "sc start" 5 and 10 min after boot; a running' + NL +
+    '# service ignores it.' + NL +
     'try {' + NL +
     '    $triggers = @(''PT5M'', ''PT10M'') | ForEach-Object { $t = New-ScheduledTaskTrigger -AtStartup; $t.Delay = $_; $t }' + NL +
     '    $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\sc.exe" -Argument ''start FleetManagerAgent''' + NL +
@@ -729,7 +746,9 @@ begin
     '            Register-ScheduledTask -TaskName $trayTask -Action $action -Principal $principal -Settings $settings -Force | Out-Null' + NL +
     '            try {' + NL +
     '                Start-ScheduledTask -TaskName $trayTask' + NL +
-    '                $deadline = (Get-Date).AddSeconds(20)' + NL +
+    '                # 60 s: with Smart App Control evaluating the new tray binaries it' + NL +
+    '                # appeared after ~20 s on SU5-F* and the old 20 s wait logged a false miss.' + NL +
+    '                $deadline = (Get-Date).AddSeconds(60)' + NL +
     '                do {' + NL +
     '                    Start-Sleep -Milliseconds 500' + NL +
     '                    $traySessions = @(Get-Process -Name FleetManager.Agent.Tray -ErrorAction SilentlyContinue | Select-Object -ExpandProperty SessionId)' + NL +

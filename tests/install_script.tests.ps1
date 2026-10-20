@@ -91,7 +91,7 @@ if (-not $iss.Contains('ParamFlag(''DeferStart'')') -or -not $iss.Contains('Para
     throw 'Installer must accept /DeferStart and /ResetSshHostKeys.'
 }
 if ($iss -notmatch 'if \(\$deferStart\) \{ ''''delayed-auto'''' \}' -or
-    $iss -notmatch 'if \(\$deferStart\) \{[^}]*starts after the next reboot[^}]*\} else \{\s*''\s*\+\s*NL\s*\+\s*''\s*& sc\.exe start FleetManagerAgent') {
+    $iss -notmatch 'if \(\$deferStart\) \{[^}]*starts after the next reboot[^}]*\} else \{[\s\S]{0,700}?& sc\.exe start FleetManagerAgent') {
     throw '/DeferStart must create the service with delayed auto-start and must not start it now.'
 }
 if ($iss -notmatch 'if \(\$deferStart\) \{\s*''\s*\+\s*NL\s*\+\s*''\s*Log ''''Tray not launched') {
@@ -270,6 +270,11 @@ foreach ($needle in @('sc.exe failure FleetManagerAgent reset= 86400 actions= re
     if (-not $serviceBlock.Contains($needle)) {
         throw "Service block must set recovery actions: $needle"
     }
+}
+# Установка/обновление тоже не укладывалось в 30 с (Smart App Control) и оставляло
+# службу остановленной до перезагрузки — запуск повторяется.
+if ($serviceBlock -notmatch 'for \(\$attempt = 1; \$attempt -le 3[\s\S]{0,200}sc\.exe start FleetManagerAgent[\s\S]{0,400}StartPending') {
+    throw 'Installer must retry the service start when the first attempt times out.'
 }
 $retryBlock = [regex]::Match($serviceBlock, '# Service start retry after boot[\s\S]*').Value
 if (-not $retryBlock) {
