@@ -22,6 +22,7 @@ if (Get-Service FleetManagerAgent -ErrorAction SilentlyContinue) {
     Stop-Service FleetManagerAgent -Force -ErrorAction SilentlyContinue
     & sc.exe delete FleetManagerAgent | Out-Null
 }
+Unregister-ScheduledTask -TaskName 'FleetManager-Agent-start-retry' -Confirm:$false -ErrorAction SilentlyContinue
 
 # The tray and control panel are independent per-user processes that otherwise
 # keep the published directory locked. Stop every instance before removing files.
