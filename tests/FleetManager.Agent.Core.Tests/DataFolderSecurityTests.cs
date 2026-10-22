@@ -54,7 +54,7 @@ public sealed class DataFolderSecurityTests : IDisposable
             Assert.All(rules, r => Assert.True(r.IsInherited, $"{file}: {r.IdentityReference}"));
             Assert.All(rules, r => Assert.Equal(Me, r.IdentityReference));
         }
-        Assert.Empty(DataFolderSecurity.Repair(_root, Test));
+        AssertNothingToFix();
     }
 
     [Fact]
@@ -73,7 +73,7 @@ public sealed class DataFolderSecurityTests : IDisposable
         var read = Assert.Single(image, r => r.IdentityReference.Equals(Users));
         Assert.True(read.IsInherited);
         Assert.Equal(FileSystemRights.ReadAndExecute, read.FileSystemRights & ~FileSystemRights.Synchronize);
-        Assert.Empty(DataFolderSecurity.Repair(_root, Test));
+        AssertNothingToFix();
     }
 
     [Fact]
@@ -85,6 +85,9 @@ public sealed class DataFolderSecurityTests : IDisposable
 
         var rules = Rules(new DirectoryInfo(Path.Combine(_root, DataFolderSecurity.WallpapersFolder)).GetAccessControl());
         Assert.Contains(rules, r => r.IdentityReference.Equals(Users) && !r.IsInherited);
+        // An elevated process creates folders owned by Administrators, not by itself: the new
+        // folder must get the same owner as the rest, or the next start would "fix" it again.
+        AssertNothingToFix();
     }
 
     [Fact]
@@ -166,6 +169,13 @@ public sealed class DataFolderSecurityTests : IDisposable
         security.SetSecurityDescriptorSddlForm(sddl);
         var expected = wallpapersFolder ? new[] { DataFolderSecurity.ReadRule(DataFolderSecurity.Machine) } : Array.Empty<FileSystemAccessRule>();
         Assert.Equal(inPlace, DataFolderSecurity.IsChildInPlace(security, expected, wallpapersFolder, DataFolderSecurity.Machine));
+    }
+
+    // A second pass must find nothing, or the service would rewrite the permissions on every start.
+    private void AssertNothingToFix()
+    {
+        var fixes = DataFolderSecurity.Repair(_root, Test);
+        Assert.True(fixes.Count == 0, string.Join(Environment.NewLine, fixes));
     }
 
     private static List<FileSystemAccessRule> Rules(FileSystemSecurity security) =>

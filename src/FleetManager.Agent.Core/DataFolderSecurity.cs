@@ -39,7 +39,7 @@ public static class DataFolderSecurity
     public static IReadOnlyList<string> Repair(string dataDirectory) => Repair(dataDirectory, Machine);
 
     /// <summary>Создаёт папку обоев, которую читают пользователи (если её нет).</summary>
-    public static void EnsureWallpapersFolder(string path) => EnsureWallpapersFolder(new DirectoryInfo(path), Machine);
+    public static void EnsureWallpapersFolder(string path) => EnsureWallpapersFolder(new DirectoryInfo(path), Machine, owner: null);
 
     internal static IReadOnlyList<string> Repair(string dataDirectory, Principals principals)
     {
@@ -69,7 +69,7 @@ public static class DataFolderSecurity
         }
 
         RepairChildren(root, principals, atRoot: true, wallpapers: false, fixes);
-        EnsureWallpapersFolder(new DirectoryInfo(Path.Combine(root.FullName, WallpapersFolder)), principals);
+        EnsureWallpapersFolder(new DirectoryInfo(Path.Combine(root.FullName, WallpapersFolder)), principals, principals.Owner);
         return fixes;
     }
 
@@ -112,11 +112,12 @@ public static class DataFolderSecurity
         }
     }
 
-    private static void EnsureWallpapersFolder(DirectoryInfo folder, Principals principals)
+    // owner = null — владелец тот, кто создал (служба: SYSTEM); Repair ставит того же владельца, что и всему остальному.
+    private static void EnsureWallpapersFolder(DirectoryInfo folder, Principals principals, SecurityIdentifier? owner)
     {
         if (folder.Exists) return;
         folder.Create();
-        folder.SetAccessControl((DirectorySecurity)Inheriting(new DirectorySecurity(), new[] { ReadRule(principals) }, owner: null));
+        folder.SetAccessControl((DirectorySecurity)Inheriting(new DirectorySecurity(), new[] { ReadRule(principals) }, owner));
     }
 
     internal static FileSystemAccessRule ReadRule(Principals principals) =>
