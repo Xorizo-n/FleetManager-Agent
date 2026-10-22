@@ -295,4 +295,47 @@ foreach ($script in @($uninstallBlock, $uninstaller)) {
     }
 }
 
+# Папка данных наследовала права ProgramData: «Пользователи» читали agent.json с
+# токеном агента и могли подкладывать файлы, которые служба читает от SYSTEM.
+$aclBlock = [regex]::Match($iss, '// Data folder access[\s\S]*?Data folder permissions warning').Value
+if (-not $aclBlock) {
+    throw 'Installer must restrict the data folder permissions.'
+}
+if ($iss -notmatch 'if CurStep = ssInstall[\s\S]*?RestrictDataFolder;\s*Exit;\s*end;[\s\S]{0,50}if CurStep <> ssPostInstall') {
+    throw 'Data folder permissions must be restricted at ssInstall, before agent.json with the tokens is written.'
+}
+foreach ($needle in @(
+    "/inheritance:r /grant:r ''*S-1-5-18:(OI)(CI)F'' /grant:r ''*S-1-5-32-544:(OI)(CI)F''",
+    "/setowner ''*S-1-5-32-544'' /T",
+    "& icacls.exe `$dataRoot /reset",
+    "& icacls.exe (Join-Path `$dataRoot ''*'') /reset /T",
+    "/grant ''*S-1-5-32-545:(OI)(CI)RX''")) {
+    if (-not $aclBlock.Contains($needle)) {
+        throw "Data folder permissions block must contain: $needle"
+    }
+}
+# Ссылки уходят до icacls /T: иначе он (и служба от SYSTEM) пошёл бы по ним за пределы папки.
+if ($aclBlock -notmatch 'ReparsePoint[\s\S]*Remove-PlantedLinks \$dataRoot[\s\S]*/setowner') {
+    throw 'Links planted in the data folder must be removed before icacls /T runs.'
+}
+if (([regex]::Matches($aclBlock, 'S-1-5-32-545')).Count -ne 1) {
+    throw 'Users must get exactly one grant: read on the wallpapers folder.'
+}
+if ($aclBlock -notmatch "\`$wallpapers = Join-Path \`$dataRoot ''wallpapers''[\s\S]*& icacls.exe \`$wallpapers /grant ''\*S-1-5-32-545") {
+    throw 'Only the wallpapers folder may be readable by Users (Explorer opens the wallpaper in the user session).'
+}
+if ($aclBlock -notmatch 'try \{[\s\S]*\} catch \{') {
+    throw 'The data folder permissions step must be non-fatal (the service re-checks them at start).'
+}
+# Служба проверяет права при каждом старте: агенты, поставленные раньше, остались с правами ProgramData.
+$serviceProgram = Get-Content (Join-Path $PSScriptRoot '..\src\FleetManager.Agent.Service\Program.cs') -Raw
+if ($serviceProgram -notmatch 'DataFolderSecurity\.Repair\(AgentConfiguration\.DefaultDataDirectory\)[\s\S]*Host\.CreateApplicationBuilder') {
+    throw 'The service must repair the data folder permissions before anything opens the folder.'
+}
+# Трей не читает файлы из папки данных — только Named Pipe.
+$tray = Get-Content (Join-Path $PSScriptRoot '..\src\FleetManager.Agent.Tray\Program.cs') -Raw
+if ($tray -match 'AgentOptions\.Load|AgentConfiguration\.(ConfigurationFile|LogFile|MachineIdentityFile|DefaultDataDirectory)|MachineIdentity\.|new AgentLogger') {
+    throw 'The tray runs unelevated and cannot read the data folder: get the data over the named pipe.'
+}
+
 Write-Output 'INSTALL_SCRIPT_TESTS_OK'
