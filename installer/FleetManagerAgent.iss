@@ -327,6 +327,49 @@ begin
   Result := True;
 end;
 
+// Data folder access. Runs at ssInstall, before agent.json with the tokens is written.
+// %ProgramData% gives BUILTIN\Users read and create rights, and the folder
+// used to inherit them: any student could read the agent token. Only SYSTEM
+// and Administrators keep access; wallpapers\ stays readable for Users, since
+// Explorer opens the assigned wallpaper in the user's session (the tray only
+// talks to the service over the named pipe). Links planted in the folder go
+// first: icacls /T and the service (as SYSTEM) would follow them. The service
+// re-checks all of this on every start (DataFolderSecurity.cs).
+procedure RestrictDataFolder;
+begin
+  RunPowerShellScript(
+    '$dataRoot = ''' + DataRootDir + '''' + NL +
+    '$logFile = ''' + DataRootDir + '\logs\install.log''' + NL +
+    'function Log { param($m) "$(Get-Date -f ''yyyy-MM-dd HH:mm:ss'')  $m" | Tee-Object -FilePath $logFile -Append | Write-Host }' + NL +
+    'function Remove-PlantedLinks { param($dir)' + NL +
+    '    foreach ($item in @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)) {' + NL +
+    '        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {' + NL +
+    '            if ($item.PSIsContainer) { [IO.Directory]::Delete($item.FullName) } else { [IO.File]::Delete($item.FullName) }' + NL +
+    '            Log "Data folder: removed link $($item.FullName)"' + NL +
+    '        } elseif ($item.PSIsContainer) { Remove-PlantedLinks $item.FullName }' + NL +
+    '    }' + NL +
+    '}' + NL +
+    'try {' + NL +
+    '    if ((Get-Item -LiteralPath $dataRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {' + NL +
+    '        [IO.Directory]::Delete($dataRoot)' + NL +
+    '        New-Item -ItemType Directory -Path (Join-Path $dataRoot ''logs'') -Force | Out-Null' + NL +
+    '        Log "Data folder: $dataRoot was a link, replaced with a folder"' + NL +
+    '    }' + NL +
+    '    Remove-PlantedLinks $dataRoot' + NL +
+    '    & icacls.exe $dataRoot /setowner ''*S-1-5-32-544'' /T /C /Q | Out-Null' + NL +
+    '    & icacls.exe $dataRoot /reset /Q | Out-Null' + NL +
+    '    & icacls.exe $dataRoot /inheritance:r /grant:r ''*S-1-5-18:(OI)(CI)F'' /grant:r ''*S-1-5-32-544:(OI)(CI)F'' /Q | Out-Null' + NL +
+    '    if ($LASTEXITCODE -ne 0) { throw "icacls exited with $LASTEXITCODE" }' + NL +
+    '    & icacls.exe (Join-Path $dataRoot ''*'') /reset /T /C /Q | Out-Null' + NL +
+    '    $wallpapers = Join-Path $dataRoot ''wallpapers''' + NL +
+    '    New-Item -ItemType Directory -Path $wallpapers -Force | Out-Null' + NL +
+    '    & icacls.exe $wallpapers /grant ''*S-1-5-32-545:(OI)(CI)RX'' /Q | Out-Null' + NL +
+    '    Log ''Data folder: access limited to SYSTEM and Administrators (wallpapers readable by Users)''' + NL +
+    '} catch {' + NL +
+    '    Log "Data folder permissions warning (non-fatal, the service re-checks them at start): $_"' + NL +
+    '}' + NL);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   InstallRoot, DataRoot, ServiceExe, TrayExe: string;
@@ -364,6 +407,8 @@ begin
       '$deadline = (Get-Date).AddSeconds(15)' + NL +
       'while ((Get-Process -Name ''FleetManager.Agent.Service'',''FleetManager.Agent.Tray'',''FleetManager.Agent.Control'' -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }' + NL +
       'Log ''Service and Tray/Control stopped, proceeding with file copy''' + NL);
+
+    RestrictDataFolder;
     Exit;
   end;
 

@@ -258,7 +258,8 @@ public sealed class WallpaperManager
 
     private async Task<string> EnsureFileAsync(WallpaperImage image, Func<string, string, CancellationToken, Task> download, CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(_directory);
+        // Обои открывает Проводник в сеансе пользователя, а остальная папка агента ему закрыта.
+        DataFolderSecurity.EnsureWallpapersFolder(_directory);
         var path = Path.Combine(_directory, image.Sha256.ToLowerInvariant() + Extension(image.FileName));
         if (File.Exists(path) && Sha256Of(path) == image.Sha256.ToLowerInvariant()) return path;
         var temp = path + ".download";
