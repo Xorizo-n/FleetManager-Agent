@@ -199,7 +199,14 @@ public sealed class FleetManagerApiClient
                 source = item.Source
             }).ToArray(),
             activation = ActivationPayload(snapshot.Activation),
-            wallpaper = WallpaperPayload(snapshot.Wallpaper)
+            wallpaper = WallpaperPayload(snapshot.Wallpaper),
+            ssh = snapshot.Ssh is null ? null : new
+            {
+                installed = snapshot.Ssh.Installed,
+                start_type = snapshot.Ssh.StartType,
+                listening = snapshot.Ssh.Listening,
+                repaired = snapshot.Ssh.Repaired
+            }
         };
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{AgentConfiguration.DefaultApiPath}/heartbeat")
         {

@@ -116,6 +116,9 @@ public sealed record AgentSnapshot(
 
     /// <summary>Обои рабочего стола и экрана блокировки; null — не собраны.</summary>
     public WallpaperReport? Wallpaper { get; init; }
+
+    /// <summary>Состояние OpenSSH Server — канала, по которому сервер управляет ПК; null — не собрано.</summary>
+    public SshServiceReport? Ssh { get; init; }
 }
 
 public sealed record AgentPipeRequest(string Command, string? Value = null);
