@@ -16,6 +16,8 @@ public sealed class AgentOptions
     public int SyncIntervalMinutes { get; set; } = 5;
     // Маршрут /32 до сервера мимо полнотуннельного VPN (ServerRoute). false — не трогать маршруты.
     public bool PinServerRoute { get; set; } = true;
+    // Держать sshd запущенным с автозапуском (SshService). false — только сообщать состояние.
+    public bool KeepSshRunning { get; set; } = true;
 
     public static AgentOptions Load(string? dataDirectory = null)
     {

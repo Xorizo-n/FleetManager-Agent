@@ -81,6 +81,12 @@ public sealed class AgentWorker : BackgroundService
             // and collecting it on every one-minute retry would only load the PC.
             if (api is not null && !await EnsureRegistrationAsync(api, cancellationToken)) return;
 
+            // sshd — единственный канал управления ПК: обновление Windows может остановить его и
+            // перевести на ручной запуск. Сбой проверки не срывает heartbeat.
+            SshServiceReport? ssh = null;
+            try { ssh = SshService.Ensure(_options.KeepSshRunning, _logger); }
+            catch (Exception ex) { _logger.Warn($"Unable to check sshd: {ex.Message}"); }
+
             var hardware = await _inventory.CollectHardwareAsync(cancellationToken);
             var software = await _inventory.CollectSoftwareAsync(cancellationToken);
             var activation = await _inventory.CollectActivationAsync(cancellationToken);
@@ -88,7 +94,7 @@ public sealed class AgentWorker : BackgroundService
             {
                 EnsureSshKeyInstalled();
                 var wallpaper = await _wallpapers.ReportAsync(cancellationToken);
-                var snapshot = new AgentSnapshot(_state.Status, hardware, software) { Activation = activation, Wallpaper = wallpaper };
+                var snapshot = new AgentSnapshot(_state.Status, hardware, software) { Activation = activation, Wallpaper = wallpaper, Ssh = ssh };
                 var desired = await api.SendHeartbeatAsync(snapshot, _options.AgentToken, _options.SshLogin, cancellationToken);
                 // Назначенные сервером обои применяются сразу; что получилось — уйдёт в следующем heartbeat
                 if (desired is not null && !string.IsNullOrWhiteSpace(_options.AgentToken))
