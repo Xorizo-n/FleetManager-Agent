@@ -190,6 +190,7 @@ public sealed class FleetManagerApiClient
             start_type = ssh.StartType,
             listening = ssh.Listening,
             responding = ssh.Responding,
+            install_error = ssh.InstallError,
             repaired = ssh.Repaired.Concat(health?.Repaired ?? Array.Empty<string>()).ToArray(),
             firewall_rule = health?.FirewallRule,
             firewall_ignored_on = health?.FirewallIgnoredOn,

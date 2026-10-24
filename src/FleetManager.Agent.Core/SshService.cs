@@ -24,6 +24,8 @@ public sealed record SshServiceReport(
 {
     public bool? Responding { get; init; }
     public SshHealthReport? Health { get; init; }
+    /// <summary>sshd is missing: why the installer could not add it (its install.log), null — not known.</summary>
+    public string? InstallError { get; init; }
 }
 
 /// <summary>What <see cref="SshService.Plan"/> decided to fix.</summary>
@@ -73,6 +75,36 @@ public static class SshService
         _ => start.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
     };
 
+    /// <summary>
+    /// The installer adds OpenSSH Server with Add-WindowsCapability and treats a failure as non-fatal
+    /// ("OpenSSH warning (non-fatal): …" in install.log): the agent then ran without SSH and nobody knew
+    /// why (SU5-K306-OP, SU5-K310-OP, SU5-F303-W01). Returns that warning from the latest install run.
+    /// </summary>
+    public static string? LastInstallError(IEnumerable<string> installLog)
+    {
+        string? error = null;
+        foreach (var line in installLog)
+        {
+            if (line.Contains("install script started", StringComparison.Ordinal)) error = null;
+            var at = line.IndexOf("OpenSSH warning (non-fatal):", StringComparison.Ordinal);
+            if (at >= 0) error = line[(at + "OpenSSH warning (non-fatal):".Length)..].Trim();
+        }
+        return string.IsNullOrEmpty(error) ? null : error.Length > 900 ? error[..900] : error;
+    }
+
+    private static string? ReadInstallError()
+    {
+        try
+        {
+            var log = Path.Combine(AgentConfiguration.DefaultDataDirectory, "logs", "install.log");
+            return File.Exists(log) ? LastInstallError(File.ReadLines(log)) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>The first bytes sshd sends are "SSH-2.0-…"; anything else is not a working sshd.</summary>
     public static bool IsSshBanner(string? received) => received?.StartsWith("SSH-", StringComparison.Ordinal) == true;
 
@@ -116,7 +148,11 @@ public static class SshService
                 responding = listening ? Responds() : null;
             }
         }
-        return new SshServiceReport(start is not null, StartTypeName(start), listening, repaired) { Responding = responding };
+        return new SshServiceReport(start is not null, StartTypeName(start), listening, repaired)
+        {
+            Responding = responding,
+            InstallError = start is null ? ReadInstallError() : null,
+        };
     }
 
     [SupportedOSPlatform("windows")]

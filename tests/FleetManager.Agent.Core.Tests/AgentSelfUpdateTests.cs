@@ -68,4 +68,21 @@ public class AgentSelfUpdateTests
     {
         Assert.Null(FleetManagerApiClient.ParseHeartbeatResponse(body).Update);
     }
+
+    [Fact]
+    public void RepairReinstallsTheSameVersionButNeverDowngrades()
+    {
+        Assert.True(AgentSelfUpdate.ShouldInstall("2026.10.25.24", new("2026.10.25.24", Sha, Repair: true), Fresh, Now));
+        Assert.False(AgentSelfUpdate.ShouldInstall("2026.10.25.24", new("2026.10.25.24", Sha), Fresh, Now));
+        Assert.False(AgentSelfUpdate.ShouldInstall("2026.10.26.25", new("2026.10.25.24", Sha, Repair: true), Fresh, Now));
+        // A failing repair stops after three attempts too
+        Assert.False(AgentSelfUpdate.ShouldInstall("2026.10.25.24", new("2026.10.25.24", Sha, Repair: true), new("2026.10.25.24", 3, Now.AddDays(-1)), Now));
+    }
+
+    [Fact]
+    public void RepairFlagIsRead()
+    {
+        var result = FleetManagerApiClient.ParseHeartbeatResponse("{\"agent_update\":{\"version\":\"2026.10.25.24\",\"sha256\":\"" + Sha + "\",\"repair\":true}}");
+        Assert.True(result.Update!.Repair);
+    }
 }

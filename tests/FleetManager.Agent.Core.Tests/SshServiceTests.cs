@@ -90,4 +90,19 @@ public class SshServiceTests
         var bound = System.Net.IPAddress.Parse("10.152.1.64");
         Assert.Equal(bound, SshService.ProbeAddress(new[] { bound }));
     }
+
+    [Fact]
+    public void InstallErrorIsTakenFromTheLatestInstallRun()
+    {
+        var log = new[]
+        {
+            "2026-10-22 10:00:00  === FleetManager Agent install script started ==",
+            "2026-10-22 10:01:00  OpenSSH warning (non-fatal): old failure",
+            "2026-10-24 07:40:00  === FleetManager Agent install script started ==",
+            "2026-10-24 07:45:00  OpenSSH warning (non-fatal): Add-WindowsCapability failed. Error code = 0x800f0954",
+        };
+        Assert.Equal("Add-WindowsCapability failed. Error code = 0x800f0954", SshService.LastInstallError(log));
+        Assert.Null(SshService.LastInstallError(log.Append("2026-10-25 08:00:00  === FleetManager Agent install script started ==")));
+        Assert.Null(SshService.LastInstallError(Array.Empty<string>()));
+    }
 }

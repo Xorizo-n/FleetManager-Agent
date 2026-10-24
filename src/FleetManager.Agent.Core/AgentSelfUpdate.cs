@@ -5,8 +5,12 @@ using System.Text.Json;
 
 namespace FleetManager.Agent.Core;
 
-/// <summary>Update the server asked for in the heartbeat response: the installer it serves and its SHA-256.</summary>
-public sealed record AgentUpdateOffer(string Version, string Sha256);
+/// <summary>
+/// Update the server asked for in the heartbeat response: the installer it serves and its SHA-256.
+/// <paramref name="Repair"/>: reinstall even the same version — the installer sets up what is missing
+/// on the PC (OpenSSH Server when the first install could not add it).
+/// </summary>
+public sealed record AgentUpdateOffer(string Version, string Sha256, bool Repair = false);
 
 /// <summary>Attempts to install one version, kept in self-update.json between restarts.</summary>
 public sealed record SelfUpdateState(string? Version, int Attempts, DateTimeOffset? LastAttemptAt);
@@ -60,10 +64,15 @@ public sealed class AgentSelfUpdate
         return 0;
     }
 
-    /// <summary>Install only a strictly newer version, at most <see cref="MaxAttempts"/> times, an hour apart.</summary>
+    /// <summary>
+    /// Install only a newer version (or the same one for a repair, never an older one),
+    /// at most <see cref="MaxAttempts"/> times per version, an hour apart.
+    /// </summary>
     public static bool ShouldInstall(string? current, AgentUpdateOffer? offer, SelfUpdateState state, DateTimeOffset now)
     {
-        if (offer is null || Compare(current, offer.Version) is not -1) return false;
+        if (offer is null) return false;
+        var order = Compare(current, offer.Version);
+        if (order is not -1 && !(offer.Repair && order == 0)) return false;
         if (!string.Equals(state.Version, offer.Version, StringComparison.Ordinal)) return true;
         if (state.Attempts >= MaxAttempts) return false;
         return state.LastAttemptAt is null || now - state.LastAttemptAt >= RetryInterval;
@@ -75,7 +84,8 @@ public sealed class AgentSelfUpdate
         var version = update.TryGetProperty("version", out var v) && v.ValueKind == JsonValueKind.String ? AgentVersion.Normalize(v.GetString()) : null;
         var sha = update.TryGetProperty("sha256", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() : null;
         if (version is null || sha is not { Length: 64 } || !sha.All(Uri.IsHexDigit)) return null;
-        return new AgentUpdateOffer(version, sha.ToLowerInvariant());
+        var repair = update.TryGetProperty("repair", out var r) && r.ValueKind == JsonValueKind.True;
+        return new AgentUpdateOffer(version, sha.ToLowerInvariant(), repair);
     }
 
     public SelfUpdateState LoadState()
@@ -109,7 +119,7 @@ public sealed class AgentSelfUpdate
             try { File.Delete(stale); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
         var installer = Path.Combine(folder, $"FleetManagerAgent-Setup-{offer.Version}.exe");
-        _logger.Info($"Server offers agent {offer.Version} (attempt {attempts} of {MaxAttempts}); downloading the installer.");
+        _logger.Info($"Server offers agent {offer.Version}{(offer.Repair ? " as a repair" : "")} (attempt {attempts} of {MaxAttempts}); downloading the installer.");
         await download(installer, cancellationToken);
 
         string actual;
