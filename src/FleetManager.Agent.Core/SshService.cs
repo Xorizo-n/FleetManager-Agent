@@ -54,6 +54,7 @@ public static class SshService
     private const int ErrorServiceAlreadyRunning = 1056;
     private const int ErrorServiceNotActive = 1062;
     private static readonly TimeSpan BannerTimeout = TimeSpan.FromSeconds(10);
+    private static int _missedBanners;
 
     /// <param name="start">Start value of the service (2 auto, 3 manual, 4 disabled); null — not installed.</param>
     /// <param name="responding">sshd answered with its banner; null — not checked.</param>
@@ -83,8 +84,11 @@ public static class SshService
         var start = ReadStartValue();
         var listening = IsListening();
         bool? responding = listening ? Responds() : null;
+        // One missed banner can be load (MaxStartups under parallel Ansible): restart only on the second sync in a row
+        _missedBanners = responding == false ? _missedBanners + 1 : 0;
         var repaired = new List<string>();
-        var plan = repair ? Plan(start, listening, responding) : SshServicePlan.Nothing;
+        bool? confirmed = responding == false && _missedBanners < 2 ? null : responding;
+        var plan = repair ? Plan(start, listening, confirmed) : SshServicePlan.Nothing;
         if (plan.SetAutomatic)
         {
             if (RunSc($"config {ServiceName} start= auto", logger) == 0)
@@ -107,6 +111,7 @@ public static class SshService
             {
                 repaired.Add(plan.Restart ? "restarted" : "started");
                 if (!plan.Restart) logger.Warn("sshd was not running; service started.");
+                _missedBanners = 0;
                 listening = WaitFor(IsListening, attempts: 10);
                 responding = listening ? Responds() : null;
             }
@@ -121,17 +126,28 @@ public static class SshService
         return key?.GetValue("Start") is int value ? value : null;
     }
 
-    private static bool IsListening() =>
-        IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Any(endpoint => endpoint.Port == Port);
+    private static IPEndPoint[] Listeners() =>
+        IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Where(endpoint => endpoint.Port == Port).ToArray();
 
-    /// <summary>Connects to 127.0.0.1:22 and waits for the banner. The firewall does not filter loopback.</summary>
+    private static bool IsListening() => Listeners().Length > 0;
+
+    /// <summary>Where to knock: loopback for a wildcard listener, else the address sshd is bound to (ListenAddress).</summary>
+    public static IPAddress ProbeAddress(IReadOnlyList<IPAddress> listening)
+    {
+        if (listening.Count == 0 || listening.Any(a => a.Equals(IPAddress.Any) || IPAddress.IsLoopback(a))) return IPAddress.Loopback;
+        if (listening.Any(a => a.Equals(IPAddress.IPv6Any))) return IPAddress.IPv6Loopback;
+        return listening.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork) ?? listening[0];
+    }
+
+    /// <summary>Connects to sshd on this PC and waits for the banner. The firewall does not filter local traffic.</summary>
     private static bool Responds()
     {
         try
         {
-            using var client = new TcpClient();
+            var address = ProbeAddress(Listeners().Select(endpoint => endpoint.Address).ToArray());
+            using var client = new TcpClient(address.AddressFamily);
             using var timeout = new CancellationTokenSource(BannerTimeout);
-            client.ConnectAsync(IPAddress.Loopback, Port, timeout.Token).AsTask().GetAwaiter().GetResult();
+            client.ConnectAsync(address, Port, timeout.Token).AsTask().GetAwaiter().GetResult();
             var buffer = new byte[64];
             var read = client.GetStream().ReadAsync(buffer, timeout.Token).AsTask().GetAwaiter().GetResult();
             return IsSshBanner(Encoding.ASCII.GetString(buffer, 0, read));

@@ -80,4 +80,14 @@ public class SshServiceTests
     {
         Assert.Equal(expected, SshService.IsSshBanner(received));
     }
+
+    [Fact]
+    public void BannerIsCheckedWhereSshdListens()
+    {
+        Assert.Equal(System.Net.IPAddress.Loopback, SshService.ProbeAddress(new[] { System.Net.IPAddress.Any, System.Net.IPAddress.IPv6Any }));
+        Assert.Equal(System.Net.IPAddress.IPv6Loopback, SshService.ProbeAddress(new[] { System.Net.IPAddress.IPv6Any }));
+        // ListenAddress 10.152.1.64 only: 127.0.0.1 would never answer and sshd would be restarted every sync
+        var bound = System.Net.IPAddress.Parse("10.152.1.64");
+        Assert.Equal(bound, SshService.ProbeAddress(new[] { bound }));
+    }
 }
