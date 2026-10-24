@@ -51,4 +51,33 @@ public class SshServiceTests
     {
         Assert.Equal(expected, SshService.StartTypeName(start));
     }
+
+    [Fact]
+    public void SshdThatDoesNotAnswerIsRestarted()
+    {
+        // SU5-F306-W01: port 22 open, "Connection timed out during banner exchange"
+        Assert.Equal(new SshServicePlan(SetAutomatic: false, Start: false, Restart: true), SshService.Plan(start: 2, listening: true, responding: false));
+    }
+
+    [Fact]
+    public void UncheckedBannerDoesNotRestart()
+    {
+        Assert.Equal(SshServicePlan.Nothing, SshService.Plan(start: 2, listening: true, responding: null));
+    }
+
+    [Fact]
+    public void DisabledSshdIsNotRestartedEither()
+    {
+        Assert.Equal(SshServicePlan.Nothing, SshService.Plan(start: 4, listening: true, responding: false));
+    }
+
+    [Theory]
+    [InlineData("SSH-2.0-OpenSSH_for_Windows_9.5", true)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    [InlineData("HTTP/1.1 400 Bad Request", false)]
+    public void BannerRecognition(string? received, bool expected)
+    {
+        Assert.Equal(expected, SshService.IsSshBanner(received));
+    }
 }

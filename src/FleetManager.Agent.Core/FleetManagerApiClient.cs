@@ -148,7 +148,65 @@ public sealed class FleetManagerApiClient
     }
 
     /// <returns>Назначенные обои из ответа сервера; null — сервер о них не сообщил.</returns>
-    public async Task<DesiredWallpapers?> SendHeartbeatAsync(AgentSnapshot snapshot, string? token, string? sshLogin, CancellationToken cancellationToken)
+    /// <summary>What the server wants from the agent in its heartbeat response; null fields — nothing asked.</summary>
+    public sealed record HeartbeatResult(DesiredWallpapers? Wallpapers, AgentUpdateOffer? Update);
+
+    internal static HeartbeatResult ParseHeartbeatResponse(string? body)
+    {
+        AgentUpdateOffer? update = null;
+        if (!string.IsNullOrWhiteSpace(body))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                if (document.RootElement.ValueKind == JsonValueKind.Object) update = AgentSelfUpdate.ParseOffer(document.RootElement);
+            }
+            catch (JsonException) { }
+        }
+        return new HeartbeatResult(ParseDesiredWallpapers(body), update);
+    }
+
+    /// <summary>The installer the server serves to its agents, downloaded with the agent's own token.</summary>
+    public async Task DownloadInstallerAsync(string token, string path, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{AgentConfiguration.DefaultApiPath}/installer");
+        request.Headers.Authorization = new("Bearer", token);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromMinutes(15));
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException($"Fleet Manager returned {(int)response.StatusCode} for the agent installer", null, response.StatusCode);
+        await using var file = File.Create(path);
+        await response.Content.CopyToAsync(file, timeout.Token);
+    }
+
+    private static object? SshPayload(SshServiceReport? ssh)
+    {
+        if (ssh is null) return null;
+        var health = ssh.Health;
+        return new
+        {
+            installed = ssh.Installed,
+            start_type = ssh.StartType,
+            listening = ssh.Listening,
+            responding = ssh.Responding,
+            repaired = ssh.Repaired.Concat(health?.Repaired ?? Array.Empty<string>()).ToArray(),
+            firewall_rule = health?.FirewallRule,
+            firewall_ignored_on = health?.FirewallIgnoredOn,
+            firewall_gpo_allows = health?.FirewallGpoAllows,
+            firewall_blocking = health?.FirewallBlocking,
+            firewall_error = health?.FirewallError,
+            network_profiles = health?.NetworkProfiles,
+            config_valid = health?.ConfigValid,
+            config_port = health?.ConfigPort,
+            path_ok = health?.PathOk,
+            login_is_admin = health?.LoginIsAdmin,
+            domain_trust = health?.DomainTrust,
+            host_keys = health?.HostKeys,
+        };
+    }
+
+    public async Task<HeartbeatResult> SendHeartbeatAsync(AgentSnapshot snapshot, string? token, string? sshLogin, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(_httpClient.BaseAddress?.ToString()))
             throw new InvalidOperationException("Fleet Manager server URL is not configured.");
@@ -200,13 +258,7 @@ public sealed class FleetManagerApiClient
             }).ToArray(),
             activation = ActivationPayload(snapshot.Activation),
             wallpaper = WallpaperPayload(snapshot.Wallpaper),
-            ssh = snapshot.Ssh is null ? null : new
-            {
-                installed = snapshot.Ssh.Installed,
-                start_type = snapshot.Ssh.StartType,
-                listening = snapshot.Ssh.Listening,
-                repaired = snapshot.Ssh.Repaired
-            }
+            ssh = SshPayload(snapshot.Ssh)
         };
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{AgentConfiguration.DefaultApiPath}/heartbeat")
         {
@@ -220,7 +272,7 @@ public sealed class FleetManagerApiClient
             throw new HttpRequestException($"Fleet Manager returned {(int)response.StatusCode}: {body}", null, response.StatusCode);
         }
         _logger.Info("Heartbeat and inventory uploaded successfully.");
-        return ParseDesiredWallpapers(await response.Content.ReadAsStringAsync(cancellationToken));
+        return ParseHeartbeatResponse(await response.Content.ReadAsStringAsync(cancellationToken));
     }
 
     public async Task<AgentRegistrationResult> RegisterAsync(string enrollmentToken, string machineId, string hostname, string? sshLogin, CancellationToken cancellationToken)

@@ -1,6 +1,9 @@
 using System.Diagnostics;
+using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Runtime.Versioning;
+using System.Text;
 using Microsoft.Win32;
 
 namespace FleetManager.Agent.Core;
@@ -8,16 +11,23 @@ namespace FleetManager.Agent.Core;
 /// <summary>
 /// State of OpenSSH Server (sshd) — Fleet Manager's only management channel to the PC.
 /// <paramref name="StartType"/>: "auto", "manual", "disabled" or null when sshd is not installed.
-/// <paramref name="Repaired"/>: what the agent fixed during this sync ("start_type", "started"), empty if nothing.
+/// <paramref name="Responding"/>: sshd sent its banner on 127.0.0.1:22; null — not checked (nothing listens).
+/// <paramref name="Repaired"/>: what the agent fixed during this sync ("start_type", "started", "restarted",
+/// later also SshHealth's "firewall_rule" and "path"), empty if nothing.
+/// <paramref name="Health"/>: firewall, sshd_config, PATH and logon checks; null if they could not run.
 /// </summary>
 public sealed record SshServiceReport(
     bool Installed,
     string? StartType,
     bool Listening,
-    IReadOnlyList<string> Repaired);
+    IReadOnlyList<string> Repaired)
+{
+    public bool? Responding { get; init; }
+    public SshHealthReport? Health { get; init; }
+}
 
 /// <summary>What <see cref="SshService.Plan"/> decided to fix.</summary>
-public sealed record SshServicePlan(bool SetAutomatic, bool Start)
+public sealed record SshServicePlan(bool SetAutomatic, bool Start, bool Restart = false)
 {
     public static readonly SshServicePlan Nothing = new(false, false);
 }
@@ -28,6 +38,8 @@ public sealed record SshServicePlan(bool SetAutomatic, bool Start)
 /// start type to Manual without logging a change; the PC then dropped out of Ansible after the
 /// next reboot while its heartbeats kept arriving. Disabled is left alone: that is a deliberate
 /// choice of an administrator or a Group Policy, the agent only reports it.
+/// A listener alone is not enough: sshd that accepts the connection but never sends its banner
+/// ("Connection timed out during banner exchange", SU5-F306-W01) is restarted.
 /// </summary>
 public static class SshService
 {
@@ -38,14 +50,17 @@ public static class SshService
     private const int StartAutomatic = 2;
     private const int StartManual = 3;
     private const int StartDisabled = 4;
-    // sc.exe start: the service is already running.
+    // sc.exe start: the service is already running; sc.exe stop: it is not running.
     private const int ErrorServiceAlreadyRunning = 1056;
+    private const int ErrorServiceNotActive = 1062;
+    private static readonly TimeSpan BannerTimeout = TimeSpan.FromSeconds(10);
 
     /// <param name="start">Start value of the service (2 auto, 3 manual, 4 disabled); null — not installed.</param>
-    public static SshServicePlan Plan(int? start, bool listening)
+    /// <param name="responding">sshd answered with its banner; null — not checked.</param>
+    public static SshServicePlan Plan(int? start, bool listening, bool? responding = null)
     {
         if (start is null || start == StartDisabled) return SshServicePlan.Nothing;
-        return new SshServicePlan(SetAutomatic: start == StartManual, Start: !listening);
+        return new SshServicePlan(SetAutomatic: start == StartManual, Start: !listening, Restart: listening && responding == false);
     }
 
     public static string? StartTypeName(int? start) => start switch
@@ -57,6 +72,9 @@ public static class SshService
         _ => start.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
     };
 
+    /// <summary>The first bytes sshd sends are "SSH-2.0-…"; anything else is not a working sshd.</summary>
+    public static bool IsSshBanner(string? received) => received?.StartsWith("SSH-", StringComparison.Ordinal) == true;
+
     /// <summary>Reports the state and, when <paramref name="repair"/> is set, fixes the start type and starts sshd.</summary>
     public static SshServiceReport Ensure(bool repair, AgentLogger logger)
     {
@@ -64,8 +82,9 @@ public static class SshService
 
         var start = ReadStartValue();
         var listening = IsListening();
+        bool? responding = listening ? Responds() : null;
         var repaired = new List<string>();
-        var plan = repair ? Plan(start, listening) : SshServicePlan.Nothing;
+        var plan = repair ? Plan(start, listening, responding) : SshServicePlan.Nothing;
         if (plan.SetAutomatic)
         {
             if (RunSc($"config {ServiceName} start= auto", logger) == 0)
@@ -75,17 +94,24 @@ public static class SshService
                 start = ReadStartValue();
             }
         }
-        if (plan.Start)
+        if (plan.Restart)
+        {
+            logger.Warn("sshd listens on port 22 but does not answer; restarting it.");
+            RunSc($"stop {ServiceName}", logger, ErrorServiceNotActive);
+            WaitFor(() => !IsListening(), attempts: 30);
+        }
+        if (plan.Start || plan.Restart)
         {
             // Already running but not on the port (sshd_config changed by hand) — nothing to start
             if (RunSc($"start {ServiceName}", logger, ErrorServiceAlreadyRunning) == 0)
             {
-                repaired.Add("started");
-                logger.Warn("sshd was not running; service started.");
-                listening = WaitForListener();
+                repaired.Add(plan.Restart ? "restarted" : "started");
+                if (!plan.Restart) logger.Warn("sshd was not running; service started.");
+                listening = WaitFor(IsListening, attempts: 10);
+                responding = listening ? Responds() : null;
             }
         }
-        return new SshServiceReport(start is not null, StartTypeName(start), listening, repaired);
+        return new SshServiceReport(start is not null, StartTypeName(start), listening, repaired) { Responding = responding };
     }
 
     [SupportedOSPlatform("windows")]
@@ -98,11 +124,29 @@ public static class SshService
     private static bool IsListening() =>
         IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Any(endpoint => endpoint.Port == Port);
 
-    private static bool WaitForListener()
+    /// <summary>Connects to 127.0.0.1:22 and waits for the banner. The firewall does not filter loopback.</summary>
+    private static bool Responds()
     {
-        for (var attempt = 0; attempt < 10; attempt++)
+        try
         {
-            if (IsListening()) return true;
+            using var client = new TcpClient();
+            using var timeout = new CancellationTokenSource(BannerTimeout);
+            client.ConnectAsync(IPAddress.Loopback, Port, timeout.Token).AsTask().GetAwaiter().GetResult();
+            var buffer = new byte[64];
+            var read = client.GetStream().ReadAsync(buffer, timeout.Token).AsTask().GetAwaiter().GetResult();
+            return IsSshBanner(Encoding.ASCII.GetString(buffer, 0, read));
+        }
+        catch (Exception ex) when (ex is SocketException or IOException or OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    private static bool WaitFor(Func<bool> condition, int attempts)
+    {
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            if (condition()) return true;
             Thread.Sleep(500);
         }
         return false;
