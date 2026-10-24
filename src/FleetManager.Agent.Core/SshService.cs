@@ -1,6 +1,9 @@
 using System.Diagnostics;
+using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Runtime.Versioning;
+using System.Text;
 using Microsoft.Win32;
 
 namespace FleetManager.Agent.Core;
@@ -8,16 +11,25 @@ namespace FleetManager.Agent.Core;
 /// <summary>
 /// State of OpenSSH Server (sshd) — Fleet Manager's only management channel to the PC.
 /// <paramref name="StartType"/>: "auto", "manual", "disabled" or null when sshd is not installed.
-/// <paramref name="Repaired"/>: what the agent fixed during this sync ("start_type", "started"), empty if nothing.
+/// <paramref name="Responding"/>: sshd sent its banner on 127.0.0.1:22; null — not checked (nothing listens).
+/// <paramref name="Repaired"/>: what the agent fixed during this sync ("start_type", "started", "restarted",
+/// later also SshHealth's "firewall_rule" and "path"), empty if nothing.
+/// <paramref name="Health"/>: firewall, sshd_config, PATH and logon checks; null if they could not run.
 /// </summary>
 public sealed record SshServiceReport(
     bool Installed,
     string? StartType,
     bool Listening,
-    IReadOnlyList<string> Repaired);
+    IReadOnlyList<string> Repaired)
+{
+    public bool? Responding { get; init; }
+    public SshHealthReport? Health { get; init; }
+    /// <summary>sshd is missing: why the installer could not add it (its install.log), null — not known.</summary>
+    public string? InstallError { get; init; }
+}
 
 /// <summary>What <see cref="SshService.Plan"/> decided to fix.</summary>
-public sealed record SshServicePlan(bool SetAutomatic, bool Start)
+public sealed record SshServicePlan(bool SetAutomatic, bool Start, bool Restart = false)
 {
     public static readonly SshServicePlan Nothing = new(false, false);
 }
@@ -28,6 +40,8 @@ public sealed record SshServicePlan(bool SetAutomatic, bool Start)
 /// start type to Manual without logging a change; the PC then dropped out of Ansible after the
 /// next reboot while its heartbeats kept arriving. Disabled is left alone: that is a deliberate
 /// choice of an administrator or a Group Policy, the agent only reports it.
+/// A listener alone is not enough: sshd that accepts the connection but never sends its banner
+/// ("Connection timed out during banner exchange", SU5-F306-W01) is restarted.
 /// </summary>
 public static class SshService
 {
@@ -38,14 +52,18 @@ public static class SshService
     private const int StartAutomatic = 2;
     private const int StartManual = 3;
     private const int StartDisabled = 4;
-    // sc.exe start: the service is already running.
+    // sc.exe start: the service is already running; sc.exe stop: it is not running.
     private const int ErrorServiceAlreadyRunning = 1056;
+    private const int ErrorServiceNotActive = 1062;
+    private static readonly TimeSpan BannerTimeout = TimeSpan.FromSeconds(10);
+    private static int _missedBanners;
 
     /// <param name="start">Start value of the service (2 auto, 3 manual, 4 disabled); null — not installed.</param>
-    public static SshServicePlan Plan(int? start, bool listening)
+    /// <param name="responding">sshd answered with its banner; null — not checked.</param>
+    public static SshServicePlan Plan(int? start, bool listening, bool? responding = null)
     {
         if (start is null || start == StartDisabled) return SshServicePlan.Nothing;
-        return new SshServicePlan(SetAutomatic: start == StartManual, Start: !listening);
+        return new SshServicePlan(SetAutomatic: start == StartManual, Start: !listening, Restart: listening && responding == false);
     }
 
     public static string? StartTypeName(int? start) => start switch
@@ -57,6 +75,39 @@ public static class SshService
         _ => start.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
     };
 
+    /// <summary>
+    /// The installer adds OpenSSH Server with Add-WindowsCapability and treats a failure as non-fatal
+    /// ("OpenSSH warning (non-fatal): …" in install.log): the agent then ran without SSH and nobody knew
+    /// why (SU5-K306-OP, SU5-K310-OP, SU5-F303-W01). Returns that warning from the latest install run.
+    /// </summary>
+    public static string? LastInstallError(IEnumerable<string> installLog)
+    {
+        string? error = null;
+        foreach (var line in installLog)
+        {
+            if (line.Contains("install script started", StringComparison.Ordinal)) error = null;
+            var at = line.IndexOf("OpenSSH warning (non-fatal):", StringComparison.Ordinal);
+            if (at >= 0) error = line[(at + "OpenSSH warning (non-fatal):".Length)..].Trim();
+        }
+        return string.IsNullOrEmpty(error) ? null : error.Length > 900 ? error[..900] : error;
+    }
+
+    private static string? ReadInstallError()
+    {
+        try
+        {
+            var log = Path.Combine(AgentConfiguration.DefaultDataDirectory, "logs", "install.log");
+            return File.Exists(log) ? LastInstallError(File.ReadLines(log)) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The first bytes sshd sends are "SSH-2.0-…"; anything else is not a working sshd.</summary>
+    public static bool IsSshBanner(string? received) => received?.StartsWith("SSH-", StringComparison.Ordinal) == true;
+
     /// <summary>Reports the state and, when <paramref name="repair"/> is set, fixes the start type and starts sshd.</summary>
     public static SshServiceReport Ensure(bool repair, AgentLogger logger)
     {
@@ -64,8 +115,12 @@ public static class SshService
 
         var start = ReadStartValue();
         var listening = IsListening();
+        bool? responding = listening ? Responds() : null;
+        // One missed banner can be load (MaxStartups under parallel Ansible): restart only on the second sync in a row
+        _missedBanners = responding == false ? _missedBanners + 1 : 0;
         var repaired = new List<string>();
-        var plan = repair ? Plan(start, listening) : SshServicePlan.Nothing;
+        bool? confirmed = responding == false && _missedBanners < 2 ? null : responding;
+        var plan = repair ? Plan(start, listening, confirmed) : SshServicePlan.Nothing;
         if (plan.SetAutomatic)
         {
             if (RunSc($"config {ServiceName} start= auto", logger) == 0)
@@ -75,17 +130,29 @@ public static class SshService
                 start = ReadStartValue();
             }
         }
-        if (plan.Start)
+        if (plan.Restart)
+        {
+            logger.Warn("sshd listens on port 22 but does not answer; restarting it.");
+            RunSc($"stop {ServiceName}", logger, ErrorServiceNotActive);
+            WaitFor(() => !IsListening(), attempts: 30);
+        }
+        if (plan.Start || plan.Restart)
         {
             // Already running but not on the port (sshd_config changed by hand) — nothing to start
             if (RunSc($"start {ServiceName}", logger, ErrorServiceAlreadyRunning) == 0)
             {
-                repaired.Add("started");
-                logger.Warn("sshd was not running; service started.");
-                listening = WaitForListener();
+                repaired.Add(plan.Restart ? "restarted" : "started");
+                if (!plan.Restart) logger.Warn("sshd was not running; service started.");
+                _missedBanners = 0;
+                listening = WaitFor(IsListening, attempts: 10);
+                responding = listening ? Responds() : null;
             }
         }
-        return new SshServiceReport(start is not null, StartTypeName(start), listening, repaired);
+        return new SshServiceReport(start is not null, StartTypeName(start), listening, repaired)
+        {
+            Responding = responding,
+            InstallError = start is null ? ReadInstallError() : null,
+        };
     }
 
     [SupportedOSPlatform("windows")]
@@ -95,14 +162,43 @@ public static class SshService
         return key?.GetValue("Start") is int value ? value : null;
     }
 
-    private static bool IsListening() =>
-        IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Any(endpoint => endpoint.Port == Port);
+    private static IPEndPoint[] Listeners() =>
+        IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Where(endpoint => endpoint.Port == Port).ToArray();
 
-    private static bool WaitForListener()
+    private static bool IsListening() => Listeners().Length > 0;
+
+    /// <summary>Where to knock: loopback for a wildcard listener, else the address sshd is bound to (ListenAddress).</summary>
+    public static IPAddress ProbeAddress(IReadOnlyList<IPAddress> listening)
     {
-        for (var attempt = 0; attempt < 10; attempt++)
+        if (listening.Count == 0 || listening.Any(a => a.Equals(IPAddress.Any) || IPAddress.IsLoopback(a))) return IPAddress.Loopback;
+        if (listening.Any(a => a.Equals(IPAddress.IPv6Any))) return IPAddress.IPv6Loopback;
+        return listening.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork) ?? listening[0];
+    }
+
+    /// <summary>Connects to sshd on this PC and waits for the banner. The firewall does not filter local traffic.</summary>
+    private static bool Responds()
+    {
+        try
         {
-            if (IsListening()) return true;
+            var address = ProbeAddress(Listeners().Select(endpoint => endpoint.Address).ToArray());
+            using var client = new TcpClient(address.AddressFamily);
+            using var timeout = new CancellationTokenSource(BannerTimeout);
+            client.ConnectAsync(address, Port, timeout.Token).AsTask().GetAwaiter().GetResult();
+            var buffer = new byte[64];
+            var read = client.GetStream().ReadAsync(buffer, timeout.Token).AsTask().GetAwaiter().GetResult();
+            return IsSshBanner(Encoding.ASCII.GetString(buffer, 0, read));
+        }
+        catch (Exception ex) when (ex is SocketException or IOException or OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    private static bool WaitFor(Func<bool> condition, int attempts)
+    {
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            if (condition()) return true;
             Thread.Sleep(500);
         }
         return false;

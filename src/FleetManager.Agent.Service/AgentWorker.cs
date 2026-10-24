@@ -10,6 +10,8 @@ public sealed class AgentWorker : BackgroundService
     private readonly IInventoryCollector _inventory;
     private readonly ServerRouteKeeper _serverRoute;
     private readonly WallpaperManager _wallpapers;
+    private readonly SshHealthChecker _sshHealth;
+    private readonly AgentSelfUpdate _selfUpdate;
     // The periodic loop and "sync" from Tray/Control may ask at the same time; the run
     // mutates _options and the state, so syncs are serialized.
     private readonly SemaphoreSlim _syncGate = new(1, 1);
@@ -25,6 +27,8 @@ public sealed class AgentWorker : BackgroundService
         _options = AgentOptions.Load(_state.DataDirectory);
         _wallpapers = new WallpaperManager(_state.DataDirectory, logger);
         _state.SetWallpaperRevision(_wallpapers.DesktopRevision);
+        _sshHealth = new SshHealthChecker(logger);
+        _selfUpdate = new AgentSelfUpdate(_state.DataDirectory, logger);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -86,6 +90,12 @@ public sealed class AgentWorker : BackgroundService
             SshServiceReport? ssh = null;
             try { ssh = SshService.Ensure(_options.KeepSshRunning, _logger); }
             catch (Exception ex) { _logger.Warn($"Unable to check sshd: {ex.Message}"); }
+            // Брандмауэр, PATH, sshd_config, права входа — то, из-за чего сервер не попадает на ПК при живом sshd
+            if (ssh is not null)
+            {
+                try { ssh = ssh with { Health = await _sshHealth.CheckAsync(_options, _options.KeepSshRunning, cancellationToken) }; }
+                catch (Exception ex) when (ex is not OperationCanceledException) { _logger.Warn($"Unable to check SSH health: {ex.Message}"); }
+            }
 
             var hardware = await _inventory.CollectHardwareAsync(cancellationToken);
             var software = await _inventory.CollectSoftwareAsync(cancellationToken);
@@ -95,13 +105,21 @@ public sealed class AgentWorker : BackgroundService
                 EnsureSshKeyInstalled();
                 var wallpaper = await _wallpapers.ReportAsync(cancellationToken);
                 var snapshot = new AgentSnapshot(_state.Status, hardware, software) { Activation = activation, Wallpaper = wallpaper, Ssh = ssh };
-                var desired = await api.SendHeartbeatAsync(snapshot, _options.AgentToken, _options.SshLogin, cancellationToken);
+                var result = await api.SendHeartbeatAsync(snapshot, _options.AgentToken, _options.SshLogin, cancellationToken);
                 // Назначенные сервером обои применяются сразу; что получилось — уйдёт в следующем heartbeat
-                if (desired is not null && !string.IsNullOrWhiteSpace(_options.AgentToken))
+                if (result.Wallpapers is { } desired && !string.IsNullOrWhiteSpace(_options.AgentToken))
                 {
                     var token = _options.AgentToken;
                     await _wallpapers.ApplyAsync(desired, (id, path, ct) => api.DownloadWallpaperAsync(id, token, path, ct), cancellationToken);
                     _state.SetWallpaperRevision(_wallpapers.DesktopRevision);
+                }
+                // Обновление без SSH: сервер предлагает его, когда до ПК не достучаться. Сбой не срывает синхронизацию.
+                if (!string.IsNullOrWhiteSpace(_options.AgentToken)
+                    && AgentSelfUpdate.ShouldInstall(AgentVersion.Current, result.Update, _selfUpdate.LoadState(), DateTimeOffset.UtcNow))
+                {
+                    var token = _options.AgentToken;
+                    try { await _selfUpdate.RunAsync(result.Update!, (path, ct) => api.DownloadInstallerAsync(token, path, ct), cancellationToken); }
+                    catch (Exception ex) when (ex is not OperationCanceledException) { _logger.Warn($"Agent self-update failed: {ex.Message}"); }
                 }
                 await _serverRoute.ConfirmPathAsync(cancellationToken);
                 var previousFingerprint = _state.Hardware?.Fingerprint;
