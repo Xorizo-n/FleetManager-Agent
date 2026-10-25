@@ -68,6 +68,21 @@ if (-not $sshBlock.Contains('DefaultShell') -or -not $sshBlock.Contains('Windows
 if ($sshBlock.Contains('Get-WindowsCapability') -or -not $sshBlock.Contains('if (-not (Get-Service sshd')) {
     throw 'OpenSSH capability must be installed only when no sshd service exists (old hosts run the MSI build).'
 }
+# 0x800f0954 (WSUS без источника компонентов) на SU5-H205-W12/W14: без запасного MSI
+# ПК оставался без SSH. Сбой Add-WindowsCapability не должен обрывать блок до MSI.
+if ($sshBlock -notmatch 'try \{ Add-WindowsCapability[^\r\n]*\} catch \{') {
+    throw 'A failed Add-WindowsCapability must be caught so the bundled MSI can be tried.'
+}
+if (-not $sshBlock.Contains('openssh\OpenSSH-Win64.msi') -or -not $sshBlock.Contains('ADDLOCAL=Server') -or -not $sshBlock.Contains('/qn')) {
+    throw 'Installer must fall back to the bundled OpenSSH MSI (server feature only, silent).'
+}
+if ($iss -notmatch 'Source: "\.\.\\publish\\openssh\\OpenSSH-Win64\.msi"; DestDir: "\{app\}\\openssh"') {
+    throw 'The OpenSSH MSI must be packed into the setup as {app}\openssh\OpenSSH-Win64.msi.'
+}
+$build = Get-Content -Raw (Join-Path $PSScriptRoot '..\build-installer.ps1')
+if ($build -notmatch '\$OpenSshSha256\s*=\s*''[0-9a-f]{64}''' -or -not $build.Contains('Get-AuthenticodeSignature')) {
+    throw 'build-installer.ps1 must pin the OpenSSH MSI by SHA-256 and check its Microsoft signature.'
+}
 # Удалённое обновление идёт по SSH-сессии этого же sshd — перезапуск посреди
 # установки мог бы убить установщик. Поэтому sshd перезапускается только в
 # конце, а внутри SSH-сессии — отложенно, через одноразовую задачу планировщика.

@@ -126,6 +126,34 @@ foreach ($bin in $RequiredBinaries) {
 }
 
 # ---------------------------------------------------------------------------
+# 2b. OpenSSH Server MSI (Win32-OpenSSH, Microsoft-signed) bundled into the setup
+# ---------------------------------------------------------------------------
+# The installer adds OpenSSH Server with Add-WindowsCapability; where the
+# Features on Demand source is unreachable (WSUS: 0x800f0954, SU5-H205-W12/W14)
+# it falls back to this MSI. Pinned by URL + SHA-256, downloaded at build time
+# (not kept in git) and cached in publish\openssh\.
+$OpenSshUrl    = 'https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-Win64-v10.0.0.0.msi'
+$OpenSshSha256 = 'ddec9c53864280759cf9f74791cefd387100e3946aa849a1c138a4ed1b96b7d9'
+$OpenSshMsi    = Join-Path $AgentRoot 'publish\openssh\OpenSSH-Win64.msi'
+Write-Host '[2b] OpenSSH Server MSI ...' -ForegroundColor Cyan
+if (-not (Test-Path -LiteralPath $OpenSshMsi) -or (Get-FileHash -LiteralPath $OpenSshMsi -Algorithm SHA256).Hash -ne $OpenSshSha256) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $OpenSshMsi) | Out-Null
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -Uri $OpenSshUrl -OutFile $OpenSshMsi -UseBasicParsing
+}
+$actual = (Get-FileHash -LiteralPath $OpenSshMsi -Algorithm SHA256).Hash
+if ($actual -ne $OpenSshSha256) {
+    Remove-Item -LiteralPath $OpenSshMsi -Force
+    throw "OpenSSH MSI has SHA-256 $actual, expected $OpenSshSha256"
+}
+$signature = Get-AuthenticodeSignature -LiteralPath $OpenSshMsi
+if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+    throw "OpenSSH MSI signature is not a valid Microsoft one: $($signature.Status) $($signature.SignerCertificate.Subject)"
+}
+Write-Host "    $OpenSshMsi (SHA-256 ok, signed by Microsoft)" -ForegroundColor Gray
+
+# ---------------------------------------------------------------------------
 # 3. Locate Inno Setup 6 compiler (ISCC.exe)
 # ---------------------------------------------------------------------------
 Write-Host '[3/3] Compiling installer ...' -ForegroundColor Cyan

@@ -82,6 +82,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 ; ALL binaries are compressed and embedded into the setup EXE at compile time.
 Source: "..\publish\win-x64\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+; OpenSSH Server MSI (build-installer.ps1 downloads and checks it): the fallback when
+; Add-WindowsCapability cannot reach the Features on Demand source (WSUS, 0x800f0954).
+Source: "..\publish\openssh\OpenSSH-Win64.msi"; DestDir: "{app}\openssh"; Flags: ignoreversion
 
 [Code]
 
@@ -516,9 +519,22 @@ begin
     '' + NL +
     '    # Hosts set up by the old install.ps1 run the Win32-OpenSSH MSI build;' + NL +
     '    # adding the Windows capability on top of it would register a second sshd.' + NL +
+    '    # Where the Features on Demand source is unreachable (WSUS: 0x800f0954)' + NL +
+    '    # the capability fails; then the MSI bundled with this setup is used.' + NL +
     '    if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {' + NL +
     '        Log ''Installing OpenSSH Server...''' + NL +
-    '        Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null' + NL +
+    '        try { Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null } catch { Log "Add-WindowsCapability failed: $($_.Exception.Message)" }' + NL +
+    '        if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {' + NL +
+    '            $openSshMsi = Join-Path $installRoot ''openssh\OpenSSH-Win64.msi''' + NL +
+    '            if (-not (Test-Path $openSshMsi)) { throw "OpenSSH Server is not installed and $openSshMsi is missing" }' + NL +
+    '            Log ''Installing OpenSSH Server from the bundled MSI (Win32-OpenSSH)...''' + NL +
+    '            $msiLog = Join-Path $dataRoot ''logs\openssh-msi.log''' + NL +
+    '            $msiArgs = @(''/i'', (''"'' + $openSshMsi + ''"''), ''ADDLOCAL=Server'', ''/qn'', ''/norestart'', ''/l*v'', (''"'' + $msiLog + ''"''))' + NL +
+    '            $msi = Start-Process -FilePath (Join-Path $env:SystemRoot ''System32\msiexec.exe'') -ArgumentList $msiArgs -Wait -PassThru' + NL +
+    '            if ($msi.ExitCode -notin 0, 3010) { throw "OpenSSH MSI failed with exit code $($msi.ExitCode), see $msiLog" }' + NL +
+    '            if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) { throw "OpenSSH MSI finished but there is no sshd service, see $msiLog" }' + NL +
+    '            Log ''OpenSSH Server installed from the bundled MSI''' + NL +
+    '        }' + NL +
     '    }' + NL +
     '    Set-Service -Name sshd -StartupType Automatic' + NL +
     '    # The first start generates sshd_config and the host keys.' + NL +
