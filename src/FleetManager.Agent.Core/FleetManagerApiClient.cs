@@ -200,6 +200,8 @@ public sealed class FleetManagerApiClient
             network_profiles = health?.NetworkProfiles,
             config_valid = health?.ConfigValid,
             config_port = health?.ConfigPort,
+            source_restricted = health?.SourceRestricted,
+            default_shell_ok = health?.DefaultShellOk,
             path_ok = health?.PathOk,
             login_is_admin = health?.LoginIsAdmin,
             domain_trust = health?.DomainTrust,

@@ -31,6 +31,10 @@ public sealed record SshHealthReport
     public string? FirewallError { get; init; }
     public bool? ConfigValid { get; init; }
     public int? ConfigPort { get; init; }
+    /// <summary>sshd_config has the installer's "only the Fleet Manager server" block; null — no sshd_config.</summary>
+    public bool? SourceRestricted { get; init; }
+    /// <summary>SSH sessions start PowerShell (the server drives hosts with ansible_shell_type=powershell); null — no sshd.</summary>
+    public bool? DefaultShellOk { get; init; }
     public bool? PathOk { get; init; }
     public bool? LoginIsAdmin { get; init; }
     public string? DomainTrust { get; init; }
@@ -88,7 +92,13 @@ public sealed class SshHealthChecker
             _domainTrust = DomainTrustState(firewall.NltestOutput);
         }
 
-        var (valid, port) = CheckConfig();
+        var (valid, port, restricted) = CheckConfig();
+        bool? shellOk = null;
+        if (restricted is not null)
+        {
+            if (repair && RepairDefaultShell()) repaired.Add("default_shell");
+            shellOk = IsPowerShell(ReadDefaultShell());
+        }
         return new SshHealthReport
         {
             // Without a source address the rule's scope cannot be compared
@@ -100,6 +110,8 @@ public sealed class SshHealthChecker
             FirewallError = firewall?.Error,
             ConfigValid = valid,
             ConfigPort = port,
+            SourceRestricted = restricted,
+            DefaultShellOk = shellOk,
             PathOk = pathOk,
             LoginIsAdmin = _loginIsAdmin,
             DomainTrust = _domainTrust,
@@ -318,15 +330,69 @@ public sealed class SshHealthChecker
         }
     }
 
+    /// <summary>The block the installer appends: logins from anywhere but the server are denied.</summary>
+    public const string SourceRestrictionMarker = "# BEGIN FleetManager SSH source restriction";
+    private const string OpenSshKey = @"SOFTWARE\OpenSSH";
+    private static readonly string PowerShellPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"System32\WindowsPowerShell\v1.0\powershell.exe");
+
+    public static bool HasSourceRestriction(IEnumerable<string> configLines) =>
+        configLines.Any(line => line.Trim() == SourceRestrictionMarker);
+
+    /// <summary>
+    /// OpenSSH's DefaultShell. Without it sessions start cmd.exe and every PowerShell command of the server
+    /// fails — what an MSI installed by hand after the agent left on SU5-H205-W01…W06.
+    /// </summary>
+    public static bool IsPowerShell(string? defaultShell)
+    {
+        var name = Path.GetFileName(defaultShell?.Trim().Trim('"') ?? string.Empty);
+        return name.Equals("powershell.exe", StringComparison.OrdinalIgnoreCase) || name.Equals("pwsh.exe", StringComparison.OrdinalIgnoreCase);
+    }
+
     [SupportedOSPlatform("windows")]
-    private (bool? Valid, int? Port) CheckConfig()
+    private static string? ReadDefaultShell()
+    {
+        using var key = Registry.LocalMachine.OpenSubKey(OpenSshKey);
+        return key?.GetValue("DefaultShell") as string;
+    }
+
+    /// <summary>Same values as the installer. true — the shell was not PowerShell and has been set.</summary>
+    [SupportedOSPlatform("windows")]
+    private bool RepairDefaultShell()
+    {
+        try
+        {
+            if (IsPowerShell(ReadDefaultShell()) || !File.Exists(PowerShellPath)) return false;
+            using var key = Registry.LocalMachine.CreateSubKey(OpenSshKey, writable: true);
+            key.SetValue("DefaultShell", PowerShellPath, RegistryValueKind.String);
+            key.SetValue("DefaultShellCommandOption", "-c", RegistryValueKind.String);
+            _logger.Warn("OpenSSH default shell was not PowerShell; set to Windows PowerShell.");
+            return true;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.Security.SecurityException)
+        {
+            _logger.Warn($"Unable to set the OpenSSH default shell: {ex.Message}");
+            return false;
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private (bool? Valid, int? Port, bool? Restricted) CheckConfig()
     {
         var config = Path.Combine(SshDirectory, "sshd_config");
         int? port = null;
-        try { if (File.Exists(config)) port = ConfiguredPort(File.ReadAllLines(config)); }
+        bool? restricted = null;
+        try
+        {
+            if (File.Exists(config))
+            {
+                var lines = File.ReadAllLines(config);
+                port = ConfiguredPort(lines);
+                restricted = HasSourceRestriction(lines);
+            }
+        }
         catch (IOException) { }
         var exe = SshdExecutable();
-        if (exe is null || !File.Exists(config)) return (null, port);
+        if (exe is null || !File.Exists(config)) return (null, port, restricted);
         try
         {
             using var process = Process.Start(new ProcessStartInfo(exe, $"-t -f \"{config}\"")
@@ -336,15 +402,15 @@ public sealed class SshHealthChecker
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             });
-            if (process is null) return (null, port);
+            if (process is null) return (null, port, restricted);
             var error = process.StandardError.ReadToEnd();
-            if (!process.WaitForExit(15_000)) { process.Kill(); return (null, port); }
+            if (!process.WaitForExit(15_000)) { process.Kill(); return (null, port, restricted); }
             if (process.ExitCode != 0) _logger.Warn($"sshd_config is rejected by sshd -t: {error.Trim()}");
-            return (process.ExitCode == 0, port);
+            return (process.ExitCode == 0, port, restricted);
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
         {
-            return (null, port);
+            return (null, port, restricted);
         }
     }
 

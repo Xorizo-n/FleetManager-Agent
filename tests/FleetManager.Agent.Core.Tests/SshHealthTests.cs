@@ -52,6 +52,24 @@ public class SshHealthTests
     }
 
     [Theory]
+    [InlineData(@"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", true)]
+    [InlineData(@"""C:\Program Files\PowerShell\7\pwsh.exe""", true)]
+    [InlineData(@"C:\Windows\System32\cmd.exe", false)]
+    [InlineData(null, false)]
+    public void DefaultShellMustBePowerShell(string? shell, bool expected)
+    {
+        Assert.Equal(expected, SshHealthChecker.IsPowerShell(shell));
+    }
+
+    [Fact]
+    public void SourceRestrictionIsTheInstallersBlock()
+    {
+        Assert.True(SshHealthChecker.HasSourceRestriction(new[] { "Port 22", "", "# BEGIN FleetManager SSH source restriction", "Match Address *,!10.40.240.154", "    DenyUsers *", "# END FleetManager SSH source restriction" }));
+        // An MSI installed by hand ships its stock sshd_config
+        Assert.False(SshHealthChecker.HasSourceRestriction(new[] { "#Port 22", "Match Group administrators", "       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys" }));
+    }
+
+    [Theory]
     [InlineData("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOx system@PC", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOx")]
     [InlineData("ecdsa-sha2-nistp256 AAAAE2VjZHNh", "ecdsa-sha2-nistp256 AAAAE2VjZHNh")]
     [InlineData("garbage", null)]
