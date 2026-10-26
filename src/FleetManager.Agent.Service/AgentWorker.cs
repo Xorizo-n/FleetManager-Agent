@@ -118,7 +118,7 @@ public sealed class AgentWorker : BackgroundService
                     && AgentSelfUpdate.ShouldInstall(AgentVersion.Current, result.Update, _selfUpdate.LoadState(), DateTimeOffset.UtcNow))
                 {
                     var token = _options.AgentToken;
-                    try { await _selfUpdate.RunAsync(result.Update!, (path, ct) => api.DownloadInstallerAsync(token, path, ct), cancellationToken); }
+                    try { await _selfUpdate.RunAsync(result.Update!, (path, ct) => api.DownloadInstallerAsync(token, path, ct), cancellationToken, api.DownloadFromUrlAsync); }
                     catch (Exception ex) when (ex is not OperationCanceledException) { _logger.Warn($"Agent self-update failed: {ex.Message}"); }
                 }
                 await _serverRoute.ConfirmPathAsync(cancellationToken);

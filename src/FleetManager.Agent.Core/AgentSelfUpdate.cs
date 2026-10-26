@@ -9,8 +9,10 @@ namespace FleetManager.Agent.Core;
 /// Update the server asked for in the heartbeat response: the installer it serves and its SHA-256.
 /// <paramref name="Repair"/>: reinstall even the same version — the installer sets up what is missing
 /// on the PC (OpenSSH Server when the first install could not add it).
+/// <paramref name="Url"/>: a signed link to the same installer on the distribution point, a server
+/// next to the PCs (FleetManager-Server services/distribution.py); the server's own copy is the fallback.
 /// </summary>
-public sealed record AgentUpdateOffer(string Version, string Sha256, bool Repair = false);
+public sealed record AgentUpdateOffer(string Version, string Sha256, bool Repair = false, string? Url = null);
 
 /// <summary>Attempts to install one version, kept in self-update.json between restarts.</summary>
 public sealed record SelfUpdateState(string? Version, int Attempts, DateTimeOffset? LastAttemptAt);
@@ -85,7 +87,10 @@ public sealed class AgentSelfUpdate
         var sha = update.TryGetProperty("sha256", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() : null;
         if (version is null || sha is not { Length: 64 } || !sha.All(Uri.IsHexDigit)) return null;
         var repair = update.TryGetProperty("repair", out var r) && r.ValueKind == JsonValueKind.True;
-        return new AgentUpdateOffer(version, sha.ToLowerInvariant(), repair);
+        var url = update.TryGetProperty("url", out var u) && u.ValueKind == JsonValueKind.String
+                  && Uri.TryCreate(u.GetString(), UriKind.Absolute, out var link) && (link.Scheme == Uri.UriSchemeHttp || link.Scheme == Uri.UriSchemeHttps)
+            ? link.AbsoluteUri : null;
+        return new AgentUpdateOffer(version, sha.ToLowerInvariant(), repair, url);
     }
 
     public SelfUpdateState LoadState()
@@ -103,8 +108,13 @@ public sealed class AgentSelfUpdate
     private void SaveState(SelfUpdateState state) =>
         File.WriteAllText(Path.Combine(_dataDirectory, StateFile), JsonSerializer.Serialize(state, JsonDefaults.Options));
 
-    /// <summary>Downloads, checks and launches the installer. true — it was started (the service will stop shortly).</summary>
-    public async Task<bool> RunAsync(AgentUpdateOffer offer, Func<string, CancellationToken, Task> download, CancellationToken cancellationToken)
+    /// <summary>
+    /// Downloads, checks and launches the installer. true — it was started (the service will stop shortly).
+    /// The offer's link (<paramref name="downloadUrl"/>) is tried first; on any failure or a wrong SHA-256
+    /// the installer comes from the server (<paramref name="download"/>).
+    /// </summary>
+    public async Task<bool> RunAsync(AgentUpdateOffer offer, Func<string, CancellationToken, Task> download, CancellationToken cancellationToken,
+        Func<string, string, CancellationToken, Task>? downloadUrl = null)
     {
         if (!OperatingSystem.IsWindows()) return false;
         var previous = LoadState();
@@ -120,18 +130,41 @@ public sealed class AgentSelfUpdate
         }
         var installer = Path.Combine(folder, $"FleetManagerAgent-Setup-{offer.Version}.exe");
         _logger.Info($"Server offers agent {offer.Version}{(offer.Repair ? " as a repair" : "")} (attempt {attempts} of {MaxAttempts}); downloading the installer.");
+        if (offer.Url is not null && downloadUrl is not null)
+        {
+            try
+            {
+                await downloadUrl(offer.Url, installer, cancellationToken);
+                var fromLink = await HashAsync(installer, cancellationToken);
+                if (fromLink == offer.Sha256)
+                    return Launch(offer, installer, folder);
+                _logger.Warn($"Installer from the distribution point has SHA-256 {fromLink}, expected {offer.Sha256}; downloading from the server.");
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.Warn($"Distribution point download failed ({ex.Message}); downloading from the server.");
+            }
+        }
         await download(installer, cancellationToken);
 
-        string actual;
-        await using (var file = File.OpenRead(installer))
-            actual = Convert.ToHexString(await SHA256.HashDataAsync(file, cancellationToken)).ToLowerInvariant();
+        var actual = await HashAsync(installer, cancellationToken);
         if (actual != offer.Sha256)
         {
             File.Delete(installer);
             _logger.Warn($"Installer for {offer.Version} has SHA-256 {actual}, the server announced {offer.Sha256}; not installed.");
             return false;
         }
+        return Launch(offer, installer, folder);
+    }
 
+    private static async Task<string> HashAsync(string path, CancellationToken cancellationToken)
+    {
+        await using var file = File.OpenRead(path);
+        return Convert.ToHexString(await SHA256.HashDataAsync(file, cancellationToken)).ToLowerInvariant();
+    }
+
+    private bool Launch(AgentUpdateOffer offer, string installer, string folder)
+    {
         var log = Path.Combine(folder, $"install-{offer.Version}.log");
         using var process = Process.Start(new ProcessStartInfo(installer, $"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=\"{log}\"")
         {

@@ -85,4 +85,25 @@ public class AgentSelfUpdateTests
         var result = FleetManagerApiClient.ParseHeartbeatResponse("{\"agent_update\":{\"version\":\"2026.10.25.24\",\"sha256\":\"" + Sha + "\",\"repair\":true}}");
         Assert.True(result.Update!.Repair);
     }
+
+    [Fact]
+    public void DistributionLinkIsReadFromTheOffer()
+    {
+        const string url = "http://10.152.240.10:8088/FleetManagerAgent-Setup.exe?md5=abc&expires=1793000000";
+        var result = FleetManagerApiClient.ParseHeartbeatResponse(
+            "{\"agent_update\":{\"version\":\"2026.10.25.24\",\"sha256\":\"" + Sha + "\",\"url\":\"" + url + "\"}}");
+        Assert.Equal(url, result.Update!.Url);
+    }
+
+    [Theory]
+    [InlineData("file:///C:/Windows/evil.exe")]
+    [InlineData("FleetManagerAgent-Setup.exe")]
+    [InlineData("")]
+    public void LinkThatIsNotHttpIsIgnored(string url)
+    {
+        var result = FleetManagerApiClient.ParseHeartbeatResponse(
+            "{\"agent_update\":{\"version\":\"2026.10.25.24\",\"sha256\":\"" + Sha + "\",\"url\":\"" + url + "\"}}");
+        Assert.NotNull(result.Update);
+        Assert.Null(result.Update!.Url);
+    }
 }
