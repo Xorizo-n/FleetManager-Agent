@@ -180,6 +180,22 @@ public sealed class FleetManagerApiClient
         await response.Content.CopyToAsync(file, timeout.Token);
     }
 
+    /// <summary>
+    /// The installer by the signed link from the update offer (the distribution point). No agent token:
+    /// the link itself is the permission, and the token must not leave for another server.
+    /// </summary>
+    public async Task DownloadFromUrlAsync(string url, string path, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(url, UriKind.Absolute));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromMinutes(5));
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException($"Distribution point returned {(int)response.StatusCode}", null, response.StatusCode);
+        await using var file = File.Create(path);
+        await response.Content.CopyToAsync(file, timeout.Token);
+    }
+
     private static object? SshPayload(SshServiceReport? ssh)
     {
         if (ssh is null) return null;
