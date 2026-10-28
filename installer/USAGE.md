@@ -1,70 +1,129 @@
-# Installation
+# Установщик агента
 
-The enrollment token is required for automatic registration. Create it through `POST /agent/enrollment-tokens` as an administrator, then run the packaged installer as Administrator:
+`FleetManagerAgent-Setup.exe` — единственный способ поставить агента. Это Inno Setup (`installer\FleetManagerAgent.iss`); все шаги установки — Pascal-код и PowerShell, который генерируется и выполняется прямо в `CurStepChanged`. Отдельного `install.ps1` нет и создавать его не нужно: любые изменения логики установки вносятся только в `.iss`. Файл `uninstall.ps1` — отдельный скрипт для ручного или удалённого удаления вне пакета.
 
-```powershell
-FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=https://fleet.example /EnrollmentToken='<raw-token>' /SshLogin='RTF\s.u.mirzagitov'
-```
+Установщик запускается от администратора (`PrivilegesRequired=admin`), 64-разрядный, ставит файлы в `%ProgramFiles%\FleetManager Agent` (меняется `/DIR="…"` или `/InstallRoot="…"`), данные и журналы пишет в `%ProgramData%\FleetManagerAgent`. В «Программах и компонентах» запись называется «FleetManager Agent» — по её `DisplayVersion` сервер проверяет версию по SSH.
 
-`SshLogin` is optional. If omitted, the installer uses the current interactive
-domain account (`DOMAIN\user`) and sends that login during agent registration.
-The same value is also sent with each heartbeat, so an existing registration can
-be repaired by updating `SshLogin` in `%ProgramData%\FleetManagerAgent\agent.json`
-and restarting the service.
+## Параметры командной строки
 
-There is no standalone `install.ps1` — all install steps (writing `agent.json`,
-OpenSSH Server, firewall, the Windows service, the tray autorun key) are
-generated and run from `installer\FleetManagerAgent.iss` (`CurStepChanged`)
-when the EXE runs. Build it with `build-installer.ps1`.
+Стандартные ключи Inno Setup (`/VERYSILENT`, `/SUPPRESSMSGBOXES`, `/NORESTART`, `/SP-`, `/LOG="файл"`, `/DIR="путь"`) работают как обычно. Свои параметры:
 
-## SSH port policy
+| Параметр | Обязателен | По умолчанию | Назначение |
+|---|---|---|---|
+| `/ServerUrl=http://…` | при первой установке | при обновлении — из `agent.json` | Адрес сервера, `http://` или `https://`. |
+| `/EnrollmentToken=…` | при первой установке | при обновлении не нужен | Токен регистрации, выпускается администратором (`POST /agent/enrollment-tokens` или «Администрирование → Агент и токены»). |
+| `/SshLogin=ДОМЕН\имя` | нет | значение из прошлой установки, иначе текущий интерактивный `ДОМЕН\пользователь` | Учётная запись, под которой сервер входит по SSH. Уходит при регистрации и в каждом heartbeat, поэтому действующую регистрацию можно исправить правкой `SshLogin` в `agent.json` и перезапуском службы. |
+| `/SshSourceAddress=a.b.c.d,10.40.0.0/24` | нет | значение из `agent.json`, иначе адрес хоста из `ServerUrl` | С каких адресов разрешён SSH (IPv4/CIDR через запятую). Сохраняется в `agent.json` и используется при обновлениях. |
+| `/DeferStart=1` | нет | выкл. | Служба создаётся с отложенным автозапуском, но не стартует; трей не запускается. Для ПК из образа. |
+| `/ResetSshHostKeys=1` | нет | выкл. | Удалить SSH-ключи хоста, унаследованные от эталонного ПК; sshd создаст свои. Внутри SSH-сессии не выполняется. |
+| `/EnableRdp=0` | нет | вкл. | Не трогать удалённый рабочий стол. Установщик никогда не выключает RDP, который уже включён. |
+| `/EnableWol=0` | нет | вкл. | Не готовить пробуждение по сети. |
 
-sshd listens on **port 22** and answers only the Fleet Manager server:
+Флаги `DeferStart` и `ResetSshHostKeys` включает любое непустое значение, кроме `0` и `false`; `EnableRdp` и `EnableWol` выключает только `0` или `false`.
 
-- the `FleetManager-Agent-SSH` firewall rule allows TCP 22 from the server's
-  address only;
-- every other enabled inbound allow rule for port 22 or `sshd.exe` (such as
-  `OpenSSH-Server-In-TCP`, open to everyone) is disabled — Windows admits a
-  connection if any allow rule matches, so leaving one would void the
-  restriction;
-- `sshd_config` gets a `Match Address *,!<server>` block with `DenyUsers *`,
-  which still applies where Group Policy overrides local firewall rules;
-- sshd moved to port 5022 by earlier installer builds is moved back to 22;
-- PowerShell becomes the OpenSSH default shell (the server uses
-  `ansible_shell_type=powershell`).
+Установка прерывается (без сообщений в тихом режиме), если нет `ServerUrl`, он не начинается с `http://`/`https://`, либо это первая установка и нет `EnrollmentToken`.
 
-The server's address is taken from the `ServerUrl` host. Pass a comma-separated
-IPv4/CIDR list to override it or to admit an admin subnet as well; the value is
-kept in `agent.json` for later upgrades:
+## Сценарии
+
+### Первая установка
 
 ```powershell
-FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=https://fleet.example /EnrollmentToken='<raw-token>' /SshSourceAddress=10.40.240.154,10.40.0.0/24
+FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=https://fleet.example /EnrollmentToken='<токен>' /SshLogin='RTF\s.u.mirzagitov'
 ```
 
-sshd is restarted at the end of the install; when the installer runs inside an
-SSH session (a remote update), the restart is deferred by two minutes through a
-self-removing scheduled task so the update's own session is not cut.
+Установщик пишет `agent.json` с токеном регистрации, регистрирует службу, ставит в автозапуск трей и запускает его. Регистрацию на сервере выполняет уже служба (в течение минуты после старта). Чистая установка — это когда в `agent.json` нет `AgentToken`: она всегда сбрасывает оставшийся `machine-id`, иначе клоны одного образа делили бы идентификатор, и сервер считал бы их одним ПК.
 
-## Provisioning a PC deployed from an image
+Пользователю сервер выдаёт готовую обёртку над этим установщиком («Администрирование → Агент и токены» → скачать у токена): она запускает его молча с `ServerUrl` и токеном, поэтому ПК получает всё, что ставит Inno (служба с восстановлением, трей, панель, OpenSSH, RDP, Wake-on-LAN, запись в «Программах»).
 
-AutoDomain installs the agent right after the domain join, before the reboot
-that applies the new computer name:
+### Обновление поверх установленного агента
 
 ```powershell
-FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=https://fleet.example /EnrollmentToken='<raw-token>' /SshLogin='DOMAIN\user' /DeferStart=1 /ResetSshHostKeys=1
+FleetManagerAgent-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```
 
-- `/DeferStart=1` creates the service with delayed auto-start but does not
-  start it (nor the tray), so the agent registers after the reboot, under the
-  new name.
-- `/ResetSshHostKeys=1` deletes the SSH host keys inherited from the reference
-  machine; sshd generates this PC's own. Refused inside an SSH session.
-- A fresh install (no `AgentToken` in `agent.json`) always drops a leftover
-  `machine-id`, so clones of one image never share it.
+Режим обновления включается, если в существующем `agent.json` есть `AgentToken` и адрес сервера. `ServerUrl` и `EnrollmentToken` тогда можно не передавать: `ServerUrl`, `AgentId`, `AgentToken`, `SshPublicKey`, `SshLogin`, `SshSourceAddress` и `SyncIntervalMinutes` переносятся из старого файла. Агент остаётся зарегистрированным на том же хосте, ключ SSH не меняется. Именно так сервер обновляет агентов удалённо: по SSH («Обновить агент» в реестре хостов, `services/agent_update.py`) или, если SSH недоступен, самостоятельным запуском установщика самой службой ([самообновление](../docs/server-protocol.md#самообновление)).
 
-The service itself also waits with registration while a computer rename is
-pending a reboot, and retries a missing registration every minute.
+Перед копированием файлов установщик останавливает службу и принудительно завершает `Tray` и `Control` во всех сеансах: все три проекта публикуются в одну папку, и оставшиеся процессы держали бы общие DLL — обновление падало бы с «file in use» (код 5). Встроенный механизм Inno `CloseApplications` для этого оказался ненадёжным на боевых ПК.
 
-The installer writes the token to `%ProgramData%\FleetManagerAgent\agent.json`, registers the service, quotes the tray path in the HKLM Run key, and starts the tray in the interactive user's Explorer context. If the current session has no Explorer process, the tray starts after the next logon.
+Обновление, запущенное внутри SSH-сессии (удалённое), ведёт себя осторожнее: перезапуск sshd откладывается на 2 минуты через одноразовую задачу планировщика (иначе оборвалась бы сессия самого обновления), сетевые адаптеры при подготовке Wake-on-LAN никогда не перезапускаются, SSH-ключи хоста не сбрасываются (`/ResetSshHostKeys` внутри SSH-сессии отклоняется), трей запускается планировщиком, а не наследует потоки ввода-вывода (иначе клиент Ansible висел бы, ожидая EOF).
 
-After registration the service installs the server-generated public SSH key in `C:\ProgramData\ssh\administrators_authorized_keys`. The matching private key is kept by Fleet Manager in the encrypted Key Store. The service retries this installation on every synchronization and reports `icacls.exe` errors instead of silently continuing, so Ansible cannot start using a key that was never accepted by Windows OpenSSH. `uninstall.ps1` stops both the service and the tray process, calls the server cleanup endpoint, removes the local authorized key, and then deletes the service and local data. If the server/API cleanup fails, the script exits with the HTTP error and keeps the configuration so the operation can be retried. For an intentional local-only removal, run `.\uninstall.ps1 -SkipRemoteCleanup` from an elevated PowerShell session.
+### ПК из образа ([AutoDomain](https://github.com/Xorizo-n/AutoDomain))
+
+AutoDomain ставит агента сразу после ввода ПК в домен, до перезагрузки, которая применяет новое имя:
+
+```powershell
+FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=https://fleet.example /EnrollmentToken='<токен>' /SshLogin='ДОМЕН\имя' /DeferStart=1 /ResetSshHostKeys=1
+```
+
+- `/DeferStart=1`: служба создаётся с отложенным автозапуском и не запускается, трей тоже. Агент регистрируется после перезагрузки уже под новым именем.
+- `/ResetSshHostKeys=1`: ключи хоста эталона удаляются, sshd генерирует собственные (с правами для SYSTEM и Администраторов).
+- Служба сама не регистрируется, пока `ComputerRename.IsPending()` (имя в `ActiveComputerName` отличается от `ComputerName`), и повторяет попытку раз в минуту.
+
+Ответ `409` при регистрации означает, что `machine-id` совпал с работающим ПК: удалите `C:\ProgramData\FleetManagerAgent\machine-id` и перезапустите службу.
+
+### Ремонтная переустановка
+
+Сервер предлагает её сам (`agent_update.repair`), когда в отчёте SSH видит, что OpenSSH Server не установлен или `sshd_config` настроен не установщиком. Руками её можно сделать тем же обновлением: установщик заново поставит sshd (если нужно — из вшитого MSI), правило брандмауэра и блок `sshd_config`.
+
+## Что делает установщик
+
+Шаги выполняются по порядку; каждый пишет в `%ProgramData%\FleetManagerAgent\logs\install.log`. Ошибка шага OpenSSH, RDP и WoL не фатальна — агент работает и без них; сбой регистрации службы фатален.
+
+1. **Подготовка (`ssInstall`).** Остановить службу и завершить трей/панель; затем `RestrictDataFolder`: убрать ссылки в папке данных, сделать владельцем Администраторов, сбросить права, отключить наследование и оставить полный доступ SYSTEM и Администраторам; `wallpapers\` открыта на чтение «Пользователям».
+2. **Копирование файлов.** Все бинарники из `publish\win-x64\*` и MSI OpenSSH (`{app}\openssh\OpenSSH-Win64.msi`).
+3. **`agent.json`.** Сбросить `machine-id` при чистой установке; записать конфигурацию (на обновлении — с переносом регистрации).
+4. **OpenSSH Server на порту 22**, доступный только серверу. Подробности — [../docs/ssh-and-connectivity.md](../docs/ssh-and-connectivity.md):
+   - источник SSH определяется как `/SshSourceAddress` → `agent.json` → хост из `ServerUrl` (не определился — SSH не трогается);
+   - установка компонента Windows, а при неудаче — вшитый MSI;
+   - первый запуск sshd (создаёт `sshd_config` и ключи), автоматический запуск службы;
+   - PowerShell как оболочка по умолчанию (`HKLM:\SOFTWARE\OpenSSH\DefaultShell`);
+   - `sshd_config`: порт 22 и блок «только адрес сервера»;
+   - правило брандмауэра `FleetManager-Agent-SSH` и отключение всех остальных разрешающих правил для порта 22 и `sshd.exe`.
+5. **Удалённый рабочий стол** (кнопка «RDP» в карточке хоста): подключения разрешены, NLA обязателен, встроенная группа правил «Удалённый рабочий стол» включена (по идентификатору ресурса, а не по локализованному имени), `TermService` из «Отключена» переводится в «Вручную». `TermService` перезапускается, только если за ПК никто не работает: слушатель RDP создаётся при старте службы и иначе порт 3389 оставался бы закрытым. Кто может входить, по-прежнему решает Windows (Администраторы / Remote Desktop Users). Групповая политика, запрещающая RDP, перекрывает локальную настройку — установщик только пишет предупреждение.
+6. **Wake-on-LAN** (кнопка «Разбудить»): у проводных адаптеров включается magic packet в Windows и в драйвере и оба флажка управления питанием — «разрешить отключение устройства для экономии энергии» и «разрешить устройству выводить компьютер из ждущего режима» (через `MSPower_*` в `root\wmi`: `powercfg /deviceenableawake` отказывается работать, пока первый флажок снят, — SU5-K204-W25); адаптер **не** перезапускается (иначе оборвалась бы SSH-сессия удалённого обновления); быстрый запуск (`HiberbootEnabled`) выключается — после «выключения» с ним ПК в гибернации, из которой по сети мало что будится. **Пробуждение по сети должно быть разрешено ещё и в BIOS** — это удалённо не сделать.
+7. **Служба Windows** `FleetManagerAgent` (`LocalSystem`): пересоздаётся при обновлении; восстановление — перезапуск через минуту после каждого сбоя (`sc.exe failure ... restart/60000/restart/60000/restart/60000`, счётчик сбрасывается раз в сутки, `failureflag 1`). Запуск — до трёх попыток: при Smart App Control в режиме оценки (ноутбуки SU5-F*) первый запуск только что записанных файлов не укладывается в 30 секунд SCM (события 7000/7009), второй занимает секунды. С `/DeferStart=1` тип запуска — отложенный автозапуск, без немедленного старта.
+8. **Задача планировщика** `FleetManager-Agent-start-retry` (от SYSTEM): `sc start FleetManagerAgent` через 5 и 10 минут после загрузки. Действия при сбое не срабатывают на таймаут запуска, а с `/DeferStart` именно загрузка после установки и есть первый запуск.
+9. **Автозапуск трея**: `HKLM\Software\Microsoft\Windows\CurrentVersion\Run` → `FleetManagerAgentTray` (путь в кавычках).
+10. **Запуск трея** в каждом сеансе вошедших пользователей (кроме `/DeferStart`): через одноразовую задачу планировщика с группой «Пользователи» и интерактивным токеном, так что трей работает от имени пользователя без повышения и никогда в сеансе 0 (удалённое обновление идёт через WMI из SSH-сессии, то есть в сеансе 0 — раньше пользователи оставались без трея до следующего входа). Ждёт появления процесса до 60 секунд. Второй трей в сеансе, где он уже есть, завершается по мьютексу. Нет Планировщика или нет вошедших — трей стартует при следующем входе.
+11. **`/ResetSshHostKeys=1`**: удаление `ssh_host_*` ключей и выставление прав на новые.
+12. **Перезапуск sshd**, чтобы он прочитал `sshd_config`; внутри SSH-сессии — одноразовая задача через 2 минуты.
+
+## Журналы
+
+| Файл | Что в нём |
+|---|---|
+| `C:\ProgramData\FleetManagerAgent\logs\install.log` | Шаги установки с отметками времени; при ошибке установки sshd оттуда берётся `install_error`. |
+| `C:\ProgramData\FleetManagerAgent\logs\setup.log` | Журнал Inno при установке через серверную обёртку, токен замаскирован. |
+| `C:\ProgramData\FleetManagerAgent\updates\install-<версия>.log` | Журнал Inno самообновления. |
+| `C:\ProgramData\FleetManagerAgent\logs\agent.log` | Журнал службы. |
+| `%TEMP%\fm-uninstall.log` | Журнал удаления через `unins000.exe`. |
+
+## Удаление
+
+Через стандартный деинсталлятор Inno:
+
+```powershell
+& "$env:ProgramFiles\FleetManager Agent\unins000.exe" /VERYSILENT
+```
+
+Он останавливает и удаляет службу и задачу `FleetManager-Agent-start-retry`, завершает трей и панель, вызывает `POST /api/agent/uninstall` (сервер удаляет агентскую учётку и, если хост создан агентом, сам хост), убирает ключ сервера из `administrators_authorized_keys` и ключ автозапуска трея. Папка данных **удаляется в любом случае**, даже если вызов сервера не удался: при сетевой ошибке сервер остаётся с записью, которую придётся убрать из интерфейса.
+
+Отдельный скрипт `installer\uninstall.ps1` ведёт себя осторожнее: при сбое очистки на сервере завершается ошибкой с HTTP-кодом и **сохраняет** конфигурацию, чтобы операцию можно было повторить. Для сознательного локального удаления:
+
+```powershell
+.\uninstall.ps1 -SkipRemoteCleanup
+```
+
+OpenSSH Server и настройки RDP/Wake-on-LAN при удалении остаются: на SSH держится Ansible, а ничего из этого агент по умолчанию не выключает.
+
+## Сборка
+
+```powershell
+.\build-installer.ps1                    # версия 1.0, полная сборка
+.\build-installer.ps1 -AppVersion 1.2
+.\build-installer.ps1 -SkipPublish       # только упаковать уже собранное в publish\win-x64
+```
+
+Нужны Windows, .NET SDK 8+ и Inno Setup 6 (с ISPP). Скрипт: очищает `publish\win-x64` → `dotnet publish` Service, Tray и Control (`-c Release -r win-x64 --self-contained`, `/p:Version` и `/p:InformationalVersion` = `-AppVersion`) → проверяет наличие трёх `.exe` → скачивает MSI OpenSSH (закреплён URL и SHA-256, проверяется подпись Microsoft, кэш `publish\openssh\`) → `ISCC /DAppVersion=…` → `dist\FleetManagerAgent-Setup.exe`. Один и тот же номер версии должен уходить и в сборки, и в установщик: на этом держится учёт версий на сервере.
+
+Версию `AppVersion "1.0"` в `.iss` менять не нужно — это умолчание для локальной сборки; CI всегда передаёт актуальную.
