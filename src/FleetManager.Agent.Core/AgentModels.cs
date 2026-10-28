@@ -119,6 +119,12 @@ public sealed record AgentSnapshot(
 
     /// <summary>Состояние OpenSSH Server — канала, по которому сервер управляет ПК; null — не собрано.</summary>
     public SshServiceReport? Ssh { get; init; }
+
+    /// <summary>Загрузка, прошлое завершение работы, установка обновлений; null — не собрано.</summary>
+    public PowerReport? Power { get; init; }
+
+    /// <summary>false — сбор ПО не удался: сервер не трогает инвентаризацию ПО (пустой список стёр бы её).</summary>
+    public bool SoftwareCollected { get; init; } = true;
 }
 
 public sealed record AgentPipeRequest(string Command, string? Value = null);

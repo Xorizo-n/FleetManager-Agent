@@ -32,3 +32,11 @@ jobs:
       - name: Build installer (compiles the .iss Pascal script)
         shell: pwsh
         run: .\build-installer.ps1 -AppVersion "0.0.0.${{ github.run_number }}"
+
+      # The installer of the PR, to try it on a test PC before the merge (kept 7 days, not a release)
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FleetManagerAgent-Setup-pr
+          path: dist/FleetManagerAgent-Setup.exe
+          retention-days: 7

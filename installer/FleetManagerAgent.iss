@@ -281,6 +281,10 @@ begin
   // из agent.json, и регистрация не повторяется (см. удалённое обновление в
   // FleetManager-Server, services/agent_update.py).
   GExistingConfig := ReadExistingConfig;
+  // Токен регистрации остаётся в agent.json: агент заново регистрируется по нему, если сервер
+  // перестал принимать его токен (401 подряд), — иначе ПК пропал бы до переустановки руками.
+  if GEnrollmentToken = '' then
+    GEnrollmentToken := Trim(JsonString(GExistingConfig, 'EnrollmentToken'));
   if GServerUrl = '' then
     GServerUrl := Trim(JsonString(GExistingConfig, 'ServerUrl'));
   GUpgrade := (Trim(JsonString(GExistingConfig, 'AgentToken')) <> '') and (GServerUrl <> '');
@@ -763,6 +767,23 @@ begin
     '    Log "Start retry task warning (non-fatal): $_"' + NL +
     '}' + NL +
     '' + NL +
+    '# Service keeper. A service stopped later (by hand, or after a crash loop that used' + NL +
+    '# up the recovery actions) left the PC silent until the next boot: every 15 min SYSTEM' + NL +
+    '# starts a stopped service. A disabled one stays disabled (an admin or GPO decided so),' + NL +
+    '# and nothing is started while a FleetManagerAgent-Setup is running (update in progress).' + NL +
+    'try {' + NL +
+    '    $keeperCommand = ''if (-not (Get-Process -Name FleetManagerAgent-Setup* -ErrorAction SilentlyContinue)) { $s = Get-Service FleetManagerAgent -ErrorAction SilentlyContinue; if ($s -and [int]$s.Status -eq 1 -and [int]$s.StartType -ne 4) { Start-Service FleetManagerAgent } }''' + NL +
+    '    # Status 1 = Stopped, StartType 4 = Disabled: numbers keep quotes out of the task argument' + NL +
+    '    $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument (''-NoProfile -NonInteractive -WindowStyle Hidden -Command "'' + $keeperCommand + ''"'')' + NL +
+    '    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(15) -RepetitionInterval (New-TimeSpan -Minutes 15)' + NL +
+    '    $principal = New-ScheduledTaskPrincipal -UserId ''S-1-5-18'' -LogonType ServiceAccount -RunLevel Highest' + NL +
+    '    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5)' + NL +
+    '    Register-ScheduledTask -TaskName ''FleetManager-Agent-keeper'' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null' + NL +
+    '    Log ''Service keeper task registered (every 15 min)''' + NL +
+    '} catch {' + NL +
+    '    Log "Service keeper task warning (non-fatal): $_"' + NL +
+    '}' + NL +
+    '' + NL +
     '# Tray autorun registry key' + NL +
     'try {' + NL +
     '    New-ItemProperty -Path ''HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'' -Name FleetManagerAgentTray -Value "`"$trayExe`"" -PropertyType String -Force | Out-Null' + NL +
@@ -919,7 +940,8 @@ begin
       '$authKeys      = ''C:\ProgramData\ssh\administrators_authorized_keys''' + NL +
       'Log ''=== FleetManager Agent uninstall script started ==''' + NL +
       '' + NL +
-      '# Stop service' + NL +
+      '# Stop service; the keeper task first, or it would start the service again' + NL +
+      'Unregister-ScheduledTask -TaskName ''FleetManager-Agent-keeper'' -Confirm:$false -ErrorAction SilentlyContinue' + NL +
       'Stop-Service FleetManagerAgent -Force -ErrorAction SilentlyContinue' + NL +
       'Log ''Service stopped''' + NL +
       '' + NL +

@@ -95,6 +95,25 @@ public class SshHealthTests
     }
 
     [Fact]
+    public void LocalAdministratorAndDomainAreParsed()
+    {
+        var state = SshHealthChecker.ParseScriptOutput("{\"rule\":\"ok\",\"local_admin\":\"disabled\",\"domain\":\"at.urfu.ru\",\"nltest\":\"Trust Verification Status = 1786 0x6fa\"}")!;
+        Assert.Equal("disabled", state.LocalAdmin);
+        Assert.Equal("at.urfu.ru", state.Domain);
+        Assert.Equal("broken", SshHealthChecker.DomainTrustState(state.NltestOutput));
+    }
+
+    [Fact]
+    public void ScriptChecksTheFallbackLogin()
+    {
+        var script = SshHealthChecker.Script(new[] { "10.40.240.154" }, repair: false, login: null, checkTrust: true, localAdmin: "admin");
+        Assert.DoesNotContain('"', script);
+        Assert.Contains("$localAdmin = 'admin'", script);
+        Assert.Contains("$out.local_admin = 'not_admin'", script);
+        Assert.Contains("$localAdmin = $null", SshHealthChecker.Script(Array.Empty<string>(), false, null, false));
+    }
+
+    [Fact]
     public void NoJsonMeansNoState()
     {
         Assert.Null(SshHealthChecker.ParseScriptOutput("Get-NetFirewallRule : access denied"));

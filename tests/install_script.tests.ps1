@@ -310,6 +310,27 @@ foreach ($script in @($uninstallBlock, $uninstaller)) {
     }
 }
 
+# Служба, остановленная позже загрузки (руками или после исчерпанных действий при сбое),
+# молчала до следующей перезагрузки: задача-сторож поднимает её каждые 15 минут, но не
+# отключённую и не во время обновления; удаление снимает сторожа до остановки службы.
+$keeperBlock = [regex]::Match($iss, '# Service keeper[\s\S]*?Service keeper task warning \(non-fatal\)').Value
+if (-not $keeperBlock) {
+    throw 'Installer must register the service keeper task (non-fatal).'
+}
+foreach ($needle in @('-RepetitionInterval (New-TimeSpan -Minutes 15)', "-TaskName ''FleetManager-Agent-keeper''", 'FleetManagerAgent-Setup*', '[int]$s.StartType -ne 4', "-UserId ''S-1-5-18''")) {
+    if (-not $keeperBlock.Contains($needle)) {
+        throw "Service keeper block must contain: $needle"
+    }
+}
+foreach ($script in @($uninstallBlock, $uninstaller)) {
+    if ($script -notmatch "Unregister-ScheduledTask -TaskName '{1,2}FleetManager-Agent-keeper'{1,2}[\s\S]*Stop-Service FleetManagerAgent") {
+        throw 'Uninstall must remove the keeper task before stopping the service.'
+    }
+}
+if ($iss -notmatch "GEnrollmentToken := Trim\(JsonString\(GExistingConfig, 'EnrollmentToken'\)\)") {
+    throw 'An update must keep the enrollment token from agent.json (re-registration after 401).'
+}
+
 # Папка данных наследовала права ProgramData: «Пользователи» читали agent.json с
 # токеном агента и могли подкладывать файлы, которые служба читает от SYSTEM.
 $aclBlock = [regex]::Match($iss, '// Data folder access[\s\S]*?Data folder permissions warning').Value

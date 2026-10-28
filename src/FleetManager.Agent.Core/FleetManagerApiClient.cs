@@ -251,6 +251,7 @@ public sealed class FleetManagerApiClient
             path_ok = health?.PathOk,
             login_is_admin = health?.LoginIsAdmin,
             domain_trust = health?.DomainTrust,
+            local_admin = health?.LocalAdmin,
             host_keys = health?.HostKeys,
         };
     }
@@ -305,9 +306,18 @@ public sealed class FleetManagerApiClient
                 publisher = item.Publisher,
                 source = item.Source
             }).ToArray(),
+            software_collected = snapshot.SoftwareCollected,
             activation = ActivationPayload(snapshot.Activation),
             wallpaper = WallpaperPayload(snapshot.Wallpaper),
-            ssh = SshPayload(snapshot.Ssh)
+            ssh = SshPayload(snapshot.Ssh),
+            power = snapshot.Power is { } power ? new
+            {
+                booted_at = power.BootedAt,
+                previous_shutdown = power.PreviousShutdown,
+                previous_shutdown_at = power.PreviousShutdownAt,
+                updates_installing = power.UpdatesInstalling,
+                reboot_pending = power.RebootPending,
+            } : null
         };
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{AgentConfiguration.DefaultApiPath}/heartbeat")
         {
@@ -357,6 +367,26 @@ public sealed class FleetManagerApiClient
         request.Headers.Authorization = new("Bearer", token);
         using var response = await _httpClient.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
+    }
+
+    /// <summary>
+    /// A short sign of life before the inventory is collected (POST /api/agent/ping): right after boot the heartbeat
+    /// waits for hardware, software and SSH checks. False — the server has no such endpoint yet (404).
+    /// </summary>
+    public async Task<bool> SendPingAsync(string machineId, string token, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"{AgentConfiguration.DefaultApiPath}/ping")
+        {
+            Content = JsonContent.Create(new { machine_id = machineId }, options: JsonDefaults.Options)
+        };
+        request.Headers.Authorization = new("Bearer", token);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        using var response = await _httpClient.SendAsync(request, timeout.Token);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return false;
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException($"Fleet Manager returned {(int)response.StatusCode} for ping", null, response.StatusCode);
+        return true;
     }
 
     public async Task SendOfflineAsync(string machineId, string token, CancellationToken cancellationToken)

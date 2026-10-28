@@ -19,7 +19,11 @@ namespace FleetManager.Agent.Core;
 /// administrators_authorized_keys); null — could not be determined.</item>
 /// <item><see cref="DomainTrust"/>: "ok", "broken" (secure channel to the domain fails — logon of domain
 /// accounts is refused), "unreachable" (no domain controller) or null — not in a domain / not checked.</item>
+/// <item><see cref="LocalAdmin"/>: the local administrator the server falls back to when the domain logon fails
+/// (same key, no domain needed): "ok", "missing", "disabled", "not_admin" or null — not checked.</item>
 /// </list>
+/// A broken trust is first repaired with <c>nltest /sc_reset</c> (a new secure channel, no password needed); when the
+/// machine password itself no longer matches, only a domain admin can rejoin the PC — the server then signs in locally.
 /// </summary>
 public sealed record SshHealthReport
 {
@@ -38,6 +42,7 @@ public sealed record SshHealthReport
     public bool? PathOk { get; init; }
     public bool? LoginIsAdmin { get; init; }
     public string? DomainTrust { get; init; }
+    public string? LocalAdmin { get; init; }
     public IReadOnlyList<string> HostKeys { get; init; } = Array.Empty<string>();
     public IReadOnlyList<string> Repaired { get; init; } = Array.Empty<string>();
 }
@@ -53,6 +58,7 @@ public sealed class SshHealthChecker
     private DateTimeOffset _logonCheckedAt = DateTimeOffset.MinValue;
     private bool? _loginIsAdmin;
     private string? _domainTrust;
+    private string? _localAdmin;
 
     public SshHealthChecker(AgentLogger logger) => _logger = logger;
 
@@ -72,7 +78,7 @@ public sealed class SshHealthChecker
             timeout.CancelAfter(ScriptTimeout);
             try
             {
-                var output = await WindowsInventoryCollector.RunPowerShellAsync(Script(sources, repair, logonDue ? options.SshLogin : null, logonDue), timeout.Token);
+                var output = await WindowsInventoryCollector.RunPowerShellAsync(Script(sources, repair, logonDue ? options.SshLogin : null, logonDue, options.LocalAdminName), timeout.Token);
                 firewall = ParseScriptOutput(output);
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is not OutOfMemoryException)
@@ -90,6 +96,12 @@ public sealed class SshHealthChecker
             _logonCheckedAt = DateTimeOffset.UtcNow;
             _loginIsAdmin = firewall.LoginIsAdmin;
             _domainTrust = DomainTrustState(firewall.NltestOutput);
+            _localAdmin = firewall.LocalAdmin;
+            if (repair && _domainTrust == "broken" && !string.IsNullOrWhiteSpace(firewall.Domain))
+            {
+                _domainTrust = await ResetSecureChannelAsync(firewall.Domain, cancellationToken);
+                if (_domainTrust == "ok") repaired.Add("domain_trust");
+            }
         }
 
         var (valid, port, restricted) = CheckConfig();
@@ -115,6 +127,7 @@ public sealed class SshHealthChecker
             PathOk = pathOk,
             LoginIsAdmin = _loginIsAdmin,
             DomainTrust = _domainTrust,
+            LocalAdmin = _localAdmin,
             HostKeys = ReadHostKeys(),
             Repaired = repaired,
         };
@@ -162,7 +175,49 @@ public sealed class SshHealthChecker
         IReadOnlyList<string> Profiles,
         string? Error,
         bool? LoginIsAdmin,
-        string? NltestOutput);
+        string? NltestOutput,
+        string? LocalAdmin = null,
+        string? Domain = null);
+
+    /// <summary>
+    /// nltest /sc_reset sets up a new secure channel, possibly with another controller: it fixes a channel stuck on
+    /// a controller that lost the PC's password replica. Then the trust is verified again.
+    /// </summary>
+    private async Task<string?> ResetSecureChannelAsync(string domain, CancellationToken cancellationToken)
+    {
+        var nltest = Path.Combine(Environment.SystemDirectory, "nltest.exe");
+        try
+        {
+            await RunAsync(nltest, "/sc_reset:" + domain, cancellationToken);
+            var state = DomainTrustState(await RunAsync(nltest, "/sc_verify:" + domain, cancellationToken));
+            if (state == "ok") _logger.Warn($"Trust with the domain {domain} was broken; nltest /sc_reset restored it.");
+            else _logger.Warn($"Trust with the domain {domain} is broken and nltest /sc_reset did not help ({state ?? "no answer"}): the PC has to be rejoined; the server signs in as the local administrator.");
+            return state ?? "broken";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.Warn($"Unable to reset the secure channel with {domain}: {ex.Message}");
+            return "broken";
+        }
+    }
+
+    private static async Task<string> RunAsync(string file, string arguments, CancellationToken cancellationToken)
+    {
+        using var process = Process.Start(new ProcessStartInfo(file, arguments)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        }) ?? throw new InvalidOperationException(file + " did not start");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(60));
+        var output = process.StandardOutput.ReadToEndAsync(timeout.Token);
+        var error = process.StandardError.ReadToEndAsync(timeout.Token);
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch (OperationCanceledException) { try { process.Kill(true); } catch (InvalidOperationException) { } throw; }
+        return await output + await error;
+    }
 
     /// <summary>
     /// Checks the installer's firewall rule (and restores it when <paramref name="repair"/> is set),
@@ -170,7 +225,7 @@ public sealed class SshHealthChecker
     /// RemoteAddress comes back from Windows as "a.b.c.d/255.255.255.0", hence Norm.
     /// Only single quotes: RunPowerShellAsync passes the script inside -Command "…".
     /// </summary>
-    internal static string Script(IReadOnlyList<string> sources, bool repair, string? login, bool checkTrust)
+    internal static string Script(IReadOnlyList<string> sources, bool repair, string? login, bool checkTrust, string? localAdmin = null)
     {
         static string Quote(string value) => "'" + value.Replace("'", "''") + "'";
         var list = sources.Count == 0 ? "@()" : "@(" + string.Join(",", sources.Select(Quote)) + ")";
@@ -180,6 +235,7 @@ public sealed class SshHealthChecker
             $"$repair = {(repair ? "$true" : "$false")}",
             $"$login = {(string.IsNullOrWhiteSpace(login) ? "$null" : Quote(login.Trim()))}",
             $"$checkTrust = {(checkTrust ? "$true" : "$false")}",
+            $"$localAdmin = {(string.IsNullOrWhiteSpace(localAdmin) ? "$null" : Quote(localAdmin.Trim()))}",
             "$out = [ordered]@{}",
             "function Norm([string]$a) {",
             "  $p = $a.Trim().Split('/', 2)",
@@ -236,8 +292,19 @@ public sealed class SshHealthChecker
             "if ($checkTrust) {",
             "  try {",
             "    $cs = Get-CimInstance Win32_ComputerSystem",
-            "    if ($cs.PartOfDomain) { $out.nltest = (& (Join-Path $env:SystemRoot 'System32\\nltest.exe') ('/sc_verify:' + $cs.Domain) 2>&1 | Out-String) }",
+            "    if ($cs.PartOfDomain) { $out.domain = [string]$cs.Domain; $out.nltest = (& (Join-Path $env:SystemRoot 'System32\\nltest.exe') ('/sc_verify:' + $cs.Domain) 2>&1 | Out-String) }",
             "  } catch { }",
+            // The fallback login: exists, enabled, a direct member of Administrators (ADSI — Get-LocalGroupMember fails on orphaned SIDs)
+            "  if ($localAdmin) {",
+            "    try {",
+            "      $user = [ADSI]('WinNT://./' + $localAdmin + ',user')",
+            "      $flags = [int]$user.UserFlags.Value",
+            "      $usid = (New-Object System.Security.Principal.SecurityIdentifier($user.objectSid.Value, 0)).Value",
+            "      $adminsGroup = (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')).Translate([System.Security.Principal.NTAccount]).Value.Split('\\')[-1]",
+            "      $adminSids = @(([ADSI]('WinNT://./' + $adminsGroup + ',group')).psbase.Invoke('Members') | ForEach-Object { (New-Object System.Security.Principal.SecurityIdentifier($_.GetType().InvokeMember('objectSid', 'GetProperty', $null, $_, $null), 0)).Value })",
+            "      if ($flags -band 2) { $out.local_admin = 'disabled' } elseif ($adminSids -contains $usid) { $out.local_admin = 'ok' } else { $out.local_admin = 'not_admin' }",
+            "    } catch { if ([string]$_.Exception.Message -match '2221|800708AD|not found|найти') { $out.local_admin = 'missing' } }",
+            "  }",
             "}",
             "ConvertTo-Json -Compress -InputObject ([pscustomobject]$out)");
     }
@@ -259,7 +326,9 @@ public sealed class SshHealthChecker
                 Strings(root, "profiles"),
                 String(root, "error"),
                 Bool(root, "login_is_admin"),
-                String(root, "nltest"));
+                String(root, "nltest"),
+                String(root, "local_admin"),
+                String(root, "domain"));
         }
         catch (JsonException)
         {
