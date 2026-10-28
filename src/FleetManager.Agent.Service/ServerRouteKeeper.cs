@@ -15,6 +15,7 @@ namespace FleetManager.Agent.Service;
 /// kept only if the server answers through it; otherwise it is removed at once.
 /// The same is done for the hosts the server names in <c>pin_routes</c> (the distribution point): a VPN
 /// captures them too, and nginx there refuses VPN addresses, so installers would fall back to the server.
+/// And the domain controllers (<see cref="DomainControllers"/>): without them a domain account cannot sign in over SSH.
 /// </summary>
 public sealed class ServerRouteKeeper : IDisposable
 {
@@ -171,6 +172,11 @@ public sealed class ServerRouteKeeper : IDisposable
                 if (address is null || address.Equals(server)) continue;
                 wanted[address.ToString()] = (address, pin.Port);
             }
+            var controller = await DomainControllers.DiscoverAsync(cancellationToken);
+            foreach (var address in DomainControllers.Addresses(candidates, controller))
+            {
+                if (!address.Equals(server)) wanted.TryAdd(address.ToString(), (address, DomainControllers.LdapPort));
+            }
         }
         foreach (var key in _pinApplied.Keys.Where(k => !wanted.ContainsKey(k)).ToList())
         {
@@ -206,7 +212,7 @@ public sealed class ServerRouteKeeper : IDisposable
             {
                 _pinApplied[key] = plan;
                 _pinFailed.Remove(key);
-                _logger.Info($"Route to {plan.Server} pinned via {plan.Gateway} ({plan.InterfaceName}), so a VPN does not cut the PC off from the distribution point.");
+                _logger.Info($"Route to {plan.Server} pinned via {plan.Gateway} ({plan.InterfaceName}), so a VPN does not capture traffic to it.");
             }
             else
             {

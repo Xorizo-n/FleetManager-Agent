@@ -6,7 +6,8 @@ using System.Runtime.InteropServices;
 namespace FleetManager.Agent.Core;
 
 /// <summary>A local IPv4 address with a default gateway, as the route planner sees it.</summary>
-public sealed record RouteCandidate(int InterfaceIndex, string Name, bool IsWired, IPAddress Address, int PrefixLength, IPAddress Gateway);
+public sealed record RouteCandidate(int InterfaceIndex, string Name, bool IsWired, IPAddress Address, int PrefixLength, IPAddress Gateway,
+    IReadOnlyList<IPAddress>? DnsServers = null);
 
 /// <summary>An extra host the server asks to keep reachable past a VPN (the distribution point), with the port to probe.</summary>
 public sealed record PinRoute(string Host, int Port);
@@ -107,11 +108,12 @@ public static class ServerRoute
                     .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork && !a.Equals(IPAddress.Any));
                 if (gateway is null) continue;
                 var index = properties.GetIPv4Properties().Index;
+                var dns = properties.DnsAddresses.Where(a => a.AddressFamily == AddressFamily.InterNetwork).ToList();
                 foreach (var unicast in properties.UnicastAddresses)
                 {
                     var address = unicast.Address;
                     if (address.AddressFamily != AddressFamily.InterNetwork || IsLinkLocal(address)) continue;
-                    result.Add(new RouteCandidate(index, nic.Name, wired, address, unicast.PrefixLength, gateway));
+                    result.Add(new RouteCandidate(index, nic.Name, wired, address, unicast.PrefixLength, gateway, dns));
                 }
             }
             catch (NetworkInformationException) { }
@@ -138,7 +140,7 @@ public static class ServerRoute
         return null;
     }
 
-    private static bool IsLinkLocal(IPAddress address) => InNetwork(address, IPAddress.Parse("169.254.0.0"), 16);
+    internal static bool IsLinkLocal(IPAddress address) => InNetwork(address, IPAddress.Parse("169.254.0.0"), 16);
 
     private static uint ToUInt32(IPAddress address)
     {
