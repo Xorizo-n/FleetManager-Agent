@@ -13,6 +13,8 @@ namespace FleetManager.Agent.Service;
 /// only through a gateway that has already led to the server without a VPN (remembered in
 /// server-route.json), it is not persistent — after a reboot the service puts it back — and it is
 /// kept only if the server answers through it; otherwise it is removed at once.
+/// The same is done for the hosts the server names in <c>pin_routes</c> (the distribution point): a VPN
+/// captures them too, and nginx there refuses VPN addresses, so installers would fall back to the server.
 /// </summary>
 public sealed class ServerRouteKeeper : IDisposable
 {
@@ -32,6 +34,12 @@ public sealed class ServerRouteKeeper : IDisposable
     private ServerRoutePlan? _applied;
     private bool _cleanedUp;
     private (ServerRoutePlan Plan, DateTimeOffset Until)? _failed;
+    private IReadOnlyList<PinRoute> _pins = [];
+    private bool _pinsLoaded;
+    private bool _pinsDirty;
+    private readonly Dictionary<string, ServerRoutePlan> _pinApplied = new();
+    private readonly Dictionary<string, (ServerRoutePlan Plan, DateTimeOffset Until)> _pinFailed = new();
+    private readonly HashSet<string> _pinCleaned = [];
 
     public ServerRouteKeeper(AgentLogger logger, AgentState state)
     {
@@ -47,6 +55,19 @@ public sealed class ServerRouteKeeper : IDisposable
     }
 
     private void OnNetworkChanged(object? sender, EventArgs e) => _debounce.Change(Debounce, Timeout.InfiniteTimeSpan);
+
+    /// <summary>
+    /// The hosts from the heartbeat response to keep reachable past a VPN; remembered in server-route.json, so the
+    /// routes come back after a restart before the first heartbeat. True when the list changed.
+    /// </summary>
+    public bool SetPins(IReadOnlyList<PinRoute> pins)
+    {
+        _pinsLoaded = true;
+        if (_pins.SequenceEqual(pins)) return false;
+        _pins = pins;
+        _pinsDirty = true;
+        return true;
+    }
 
     /// <summary>Before talking to the server: pin (or drop) the route for the current network.</summary>
     public Task EnsureAsync(CancellationToken cancellationToken) => RunAsync(confirmPath: false, fromNetworkChange: false, cancellationToken);
@@ -76,6 +97,18 @@ public sealed class ServerRouteKeeper : IDisposable
                 SaveTrusted(trusted);
             }
             var gateways = trusted.Gateways.Select(IPAddress.Parse).ToList();
+            if (!_pinsLoaded)
+            {
+                _pins = trusted.Pins.Select(p => new PinRoute(p.Host, p.Port)).ToList();
+                _pinsLoaded = true;
+            }
+            else if (_pinsDirty)
+            {
+                trusted.Pins = _pins.Select(p => new TrustedPin { Host = p.Host, Port = p.Port }).ToList();
+                SaveTrusted(trusted);
+            }
+            _pinsDirty = false;
+            await SyncPinsAsync(options.PinServerRoute, server, candidates, gateways, fromNetworkChange, cancellationToken);
             var plan = options.PinServerRoute ? ServerRoute.Plan(server, candidates, gateways) : null;
 
             if (plan is not null && plan == _applied)
@@ -119,6 +152,68 @@ public sealed class ServerRouteKeeper : IDisposable
         finally
         {
             _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Pins a /32 route to each host from <c>pin_routes</c> through a trusted gateway, with the same safety as the
+    /// server route: only a gateway that has led to the server without a VPN, and only while the host's port answers.
+    /// </summary>
+    private async Task SyncPinsAsync(bool enabled, IPAddress server, IReadOnlyList<RouteCandidate> candidates,
+        IReadOnlyList<IPAddress> gateways, bool fromNetworkChange, CancellationToken cancellationToken)
+    {
+        var wanted = new Dictionary<string, (IPAddress Address, int Port)>();
+        if (enabled)
+        {
+            foreach (var pin in _pins)
+            {
+                var address = await ResolveAsync(pin.Host, cancellationToken);
+                if (address is null || address.Equals(server)) continue;
+                wanted[address.ToString()] = (address, pin.Port);
+            }
+        }
+        foreach (var key in _pinApplied.Keys.Where(k => !wanted.ContainsKey(k)).ToList())
+        {
+            Run("DELETE", _pinApplied[key]);
+            _logger.Info($"Route to {key} removed.");
+            _pinApplied.Remove(key);
+            _pinFailed.Remove(key);
+        }
+        foreach (var (key, (address, port)) in wanted)
+        {
+            var plan = ServerRoute.Plan(address, candidates, gateways);
+            if (plan is not null && _pinApplied.TryGetValue(key, out var applied) && applied == plan)
+            {
+                Run("ADD", plan);
+                continue;
+            }
+            if (_pinApplied.Remove(key, out var old))
+            {
+                Run("DELETE", old);
+                _logger.Info($"Route to {old.Server} via {old.Gateway} removed.");
+            }
+            else if (_pinCleaned.Add(key))
+            {
+                // A route left by the previous run of the service.
+                RunRoute($"DELETE {address} MASK 255.255.255.255");
+            }
+            if (plan is null) continue;
+            if (_pinFailed.TryGetValue(key, out var failed) && failed.Plan == plan
+                && (fromNetworkChange || DateTimeOffset.UtcNow < failed.Until)) continue;
+
+            Run("ADD", plan);
+            if (await ProbeAsync(address, port, cancellationToken))
+            {
+                _pinApplied[key] = plan;
+                _pinFailed.Remove(key);
+                _logger.Info($"Route to {plan.Server} pinned via {plan.Gateway} ({plan.InterfaceName}), so a VPN does not cut the PC off from the distribution point.");
+            }
+            else
+            {
+                Run("DELETE", plan);
+                _pinFailed[key] = (plan, DateTimeOffset.UtcNow + FailedPlanCooldown);
+                _logger.Warn($"{plan.Server}:{port} did not answer via {plan.Gateway} ({plan.InterfaceName}); the route was removed.");
+            }
         }
     }
 
@@ -201,5 +296,12 @@ public sealed class ServerRouteKeeper : IDisposable
     {
         public string Server { get; set; } = string.Empty;
         public List<string> Gateways { get; set; } = [];
+        public List<TrustedPin> Pins { get; set; } = [];
+    }
+
+    private sealed class TrustedPin
+    {
+        public string Host { get; set; } = string.Empty;
+        public int Port { get; set; }
     }
 }

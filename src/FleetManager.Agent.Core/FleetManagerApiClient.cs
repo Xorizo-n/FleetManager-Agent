@@ -149,7 +149,7 @@ public sealed class FleetManagerApiClient
 
     /// <returns>Назначенные обои из ответа сервера; null — сервер о них не сообщил.</returns>
     /// <summary>What the server wants from the agent in its heartbeat response; null fields — nothing asked.</summary>
-    public sealed record HeartbeatResult(DesiredWallpapers? Wallpapers, AgentUpdateOffer? Update);
+    public sealed record HeartbeatResult(DesiredWallpapers? Wallpapers, AgentUpdateOffer? Update, IReadOnlyList<PinRoute>? PinRoutes = null);
 
     internal static HeartbeatResult ParseHeartbeatResponse(string? body)
     {
@@ -163,7 +163,37 @@ public sealed class FleetManagerApiClient
             }
             catch (JsonException) { }
         }
-        return new HeartbeatResult(ParseDesiredWallpapers(body), update);
+        return new HeartbeatResult(ParseDesiredWallpapers(body), update, ParsePinRoutes(body));
+    }
+
+    private const int MaxPinRoutes = 4;
+
+    /// <summary>
+    /// <c>pin_routes</c> of the heartbeat response: hosts (the distribution point) that a full-tunnel VPN must not
+    /// capture. Absent or malformed means none, which also takes back routes the server no longer asks for.
+    /// </summary>
+    internal static IReadOnlyList<PinRoute> ParsePinRoutes(string? body)
+    {
+        var result = new List<PinRoute>();
+        if (string.IsNullOrWhiteSpace(body)) return result;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("pin_routes", out var routes)
+                || routes.ValueKind != JsonValueKind.Array) return result;
+            foreach (var item in routes.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object) continue;
+                var host = item.TryGetProperty("host", out var h) && h.ValueKind == JsonValueKind.String ? h.GetString()?.Trim() : null;
+                var port = item.TryGetProperty("port", out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt32(out var value) ? value : 0;
+                if (string.IsNullOrEmpty(host) || port is < 1 or > 65535) continue;
+                result.Add(new PinRoute(host, port));
+                if (result.Count == MaxPinRoutes) break;
+            }
+        }
+        catch (JsonException) { }
+        return result;
     }
 
     /// <summary>The installer the server serves to its agents, downloaded with the agent's own token.</summary>

@@ -106,6 +106,8 @@ public sealed class AgentWorker : BackgroundService
                 var wallpaper = await _wallpapers.ReportAsync(cancellationToken);
                 var snapshot = new AgentSnapshot(_state.Status, hardware, software) { Activation = activation, Wallpaper = wallpaper, Ssh = ssh };
                 var result = await api.SendHeartbeatAsync(snapshot, _options.AgentToken, _options.SshLogin, cancellationToken);
+                // Точка раздачи, до которой VPN не должен перехватывать трафик: маршрут нужен уже самообновлению ниже
+                if (_serverRoute.SetPins(result.PinRoutes ?? Array.Empty<PinRoute>())) await _serverRoute.EnsureAsync(cancellationToken);
                 // Назначенные сервером обои применяются сразу; что получилось — уйдёт в следующем heartbeat
                 if (result.Wallpapers is { } desired && !string.IsNullOrWhiteSpace(_options.AgentToken))
                 {
