@@ -18,6 +18,8 @@ if (Test-Path -LiteralPath $configPath) {
     $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 }
 
+# The keeper task first, or it would start the service again
+Unregister-ScheduledTask -TaskName 'FleetManager-Agent-keeper' -Confirm:$false -ErrorAction SilentlyContinue
 if (Get-Service FleetManagerAgent -ErrorAction SilentlyContinue) {
     Stop-Service FleetManagerAgent -Force -ErrorAction SilentlyContinue
     & sc.exe delete FleetManagerAgent | Out-Null

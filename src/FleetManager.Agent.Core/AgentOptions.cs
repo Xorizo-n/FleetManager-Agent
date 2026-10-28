@@ -18,6 +18,9 @@ public sealed class AgentOptions
     public bool PinServerRoute { get; set; } = true;
     // Держать sshd запущенным с автозапуском (SshService). false — только сообщать состояние.
     public bool KeepSshRunning { get; set; } = true;
+    // Локальный администратор, под которым сервер входит тем же ключом, когда доменный вход не проходит
+    // (нарушено доверие, нет контроллера). Его создаёт AutoDomain, пароль ставит плейбук аудитории.
+    public string LocalAdminName { get; set; } = "admin";
 
     public static AgentOptions Load(string? dataDirectory = null)
     {
