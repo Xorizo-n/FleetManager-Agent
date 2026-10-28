@@ -51,6 +51,12 @@ public sealed class SshHealthChecker
 {
     // Logon checks ask a domain controller; they change rarely.
     internal static readonly TimeSpan LogonCheckInterval = TimeSpan.FromHours(1);
+    // While the domain is not fine the server signs in as the local administrator: notice the return of the controller
+    // (a VPN dropped, the network came back) within minutes, not an hour.
+    internal static readonly TimeSpan TroubledLogonCheckInterval = TimeSpan.FromMinutes(5);
+
+    internal static TimeSpan NextLogonCheck(string? domainTrust) =>
+        domainTrust is "broken" or "unreachable" ? TroubledLogonCheckInterval : LogonCheckInterval;
     private static readonly TimeSpan ScriptTimeout = TimeSpan.FromSeconds(90);
     private const string SshDirectory = @"C:\ProgramData\ssh";
 
@@ -70,7 +76,7 @@ public sealed class SshHealthChecker
         if (repair && MachinePath.Repair(_logger)) repaired.Add("path");
         var pathOk = MachinePath.IsHealthy();
 
-        var logonDue = DateTimeOffset.UtcNow - _logonCheckedAt >= LogonCheckInterval;
+        var logonDue = DateTimeOffset.UtcNow - _logonCheckedAt >= NextLogonCheck(_domainTrust);
         var sources = FirewallSources(options.SshSourceAddress, options.ServerUrl);
         FirewallState? firewall = null;
         using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))

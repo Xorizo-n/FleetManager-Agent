@@ -104,6 +104,15 @@ public class SshHealthTests
     }
 
     [Fact]
+    public void TroubledDomainIsRecheckedSoon()
+    {
+        Assert.Equal(TimeSpan.FromHours(1), SshHealthChecker.NextLogonCheck("ok"));
+        Assert.Equal(TimeSpan.FromHours(1), SshHealthChecker.NextLogonCheck(null));
+        Assert.Equal(TimeSpan.FromMinutes(5), SshHealthChecker.NextLogonCheck("unreachable"));
+        Assert.Equal(TimeSpan.FromMinutes(5), SshHealthChecker.NextLogonCheck("broken"));
+    }
+
+    [Fact]
     public void ScriptChecksTheFallbackLogin()
     {
         var script = SshHealthChecker.Script(new[] { "10.40.240.154" }, repair: false, login: null, checkTrust: true, localAdmin: "admin");
