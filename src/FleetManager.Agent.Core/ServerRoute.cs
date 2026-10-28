@@ -8,6 +8,9 @@ namespace FleetManager.Agent.Core;
 /// <summary>A local IPv4 address with a default gateway, as the route planner sees it.</summary>
 public sealed record RouteCandidate(int InterfaceIndex, string Name, bool IsWired, IPAddress Address, int PrefixLength, IPAddress Gateway);
 
+/// <summary>An extra host the server asks to keep reachable past a VPN (the distribution point), with the port to probe.</summary>
+public sealed record PinRoute(string Host, int Port);
+
 /// <summary>Host route to the Fleet Manager server through a physical adapter's gateway.</summary>
 public sealed record ServerRoutePlan(IPAddress Server, int InterfaceIndex, string InterfaceName, IPAddress Gateway);
 
