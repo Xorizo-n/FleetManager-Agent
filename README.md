@@ -1,95 +1,95 @@
 # FleetManager Agent
 
-Windows-агент для Fleet Manager. Вариант 1 состоит из службы Windows, tray-приложения и отдельной панели управления, которая запускается только через UAC.
+Windows-агент для [Fleet Manager](https://github.com/Xorizo-n/FleetManager-Server) — системы управления парком компьютеров университета. Агент ставится на ПК одним EXE-установщиком, регистрируется на сервере по токену и дальше:
 
-## Связанные репозитории
+- раз в 5 минут присылает **heartbeat** с инвентаризацией: железо, сетевые адаптеры (MAC и IPv4 для Wake-on-LAN, скорость линка), диски и их заполненность, состав рабочего места (плата, BIOS, модули памяти, физические диски, видеокарты, мониторы по EDID, клавиатуры, мыши, USB), установленное ПО, версию агента;
+- раз в час собирает **активацию Windows и Office** (состояние лицензий, последнее обращение к KMS, доступность порта KMS, CMID);
+- держит рабочим **SSH-канал**, по которому сервер управляет ПК через Ansible: ставит и настраивает OpenSSH Server, ограничивает порт 22 адресом сервера, чинит остановленный sshd, правило брандмауэра, PATH и оболочку;
+- закрепляет маршруты до сервера, точки раздачи установщиков и контроллеров домена **мимо полнотуннельного VPN**;
+- применяет **обои рабочего стола и экрана блокировки**, назначенные сервером (через локальную групповую политику, с откатом к значениям образа);
+- **обновляет сам себя** по предложению сервера, если по SSH до ПК не достучаться;
+- готовит ПК к **RDP** и **Wake-on-LAN**;
+- показывает пользователю **значок в трее** и даёт администратору панель управления.
 
-- [FleetManager-Server](https://github.com/Xorizo-n/FleetManager-Server) — backend/frontend, принимает регистрацию, heartbeat и инвентаризацию от агента (`routers/agent.py`).
-- [RTF_OOD_AnsiblePlaybooks](https://github.com/kozlov174/RTF_OOD_AnsiblePlaybooks) — плейбуки, которые сервер запускает на хостах с установленным агентом.
+## Состав
 
-## Структура
+| Компонент | Роль |
+|---|---|
+| Служба `FleetManagerAgent` | Работает от `LocalSystem`; вся работа — здесь |
+| Tray | Значок в области уведомлений, по одному на сеанс, без прав администратора |
+| Control | Панель управления; запускается только через UAC (`requireAdministrator`) |
+| Установщик | `FleetManagerAgent-Setup.exe` (Inno Setup) — единственный способ установки и обновления |
 
-- `src/FleetManager.Agent.Core` — конфигурация, machine-id, состояние, журнал, Named Pipe, API-клиент и сбор инвентаризации.
-- `src/FleetManager.Agent.Service` — фоновая служба: периодический сбор железа/ПО, heartbeat и обработка локальных команд.
-- `src/FleetManager.Agent.Ui` — общие для Tray и Control тема и элементы интерфейса в стиле Windows 11 (светлая и тёмная тема, акцентный цвет системы).
-- `src/FleetManager.Agent.Tray` — неэле­вированный процесс в области уведомлений; открывает Control через `runas`.
-- `src/FleetManager.Agent.Control` — WinForms-панель с manifest `requireAdministrator`.
-- `installer` — `FleetManagerAgent.iss` (Inno Setup; единственный источник логики установки — OpenSSH Server на порту 22 только для сервера, firewall, служба, автозапуск tray) и `uninstall.ps1` (ручное локальное удаление вне пакета).
+Служба, трей и панель общаются только по Named Pipe; трей и панель не читают файлов агента.
 
-## Сборка
+## Документация
 
-```powershell
-dotnet publish src/FleetManager.Agent.Service/FleetManager.Agent.Service.csproj -c Release -r win-x64 --self-contained true -o publish/win-x64
-dotnet publish src/FleetManager.Agent.Tray/FleetManager.Agent.Tray.csproj -c Release -r win-x64 --self-contained true -o publish/win-x64
-dotnet publish src/FleetManager.Agent.Control/FleetManager.Agent.Control.csproj -c Release -r win-x64 --self-contained true -o publish/win-x64
-```
+| Документ | О чём |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Проекты, цикл синхронизации, что собирается, папка данных, `agent.json`, Named Pipe, интерфейс |
+| [docs/server-protocol.md](docs/server-protocol.md) | HTTP-контракт с сервером: `register`, `heartbeat` (поля запроса и ответа), самообновление, совместимость версий |
+| [docs/ssh-and-connectivity.md](docs/ssh-and-connectivity.md) | Политика порта 22, самолечение sshd, маршруты мимо VPN, обновление без SSH |
+| [installer/USAGE.md](installer/USAGE.md) | Параметры установщика, сценарии (установка, обновление, ПК из образа), шаги, журналы, удаление, сборка |
+| [docs/operations.md](docs/operations.md) | Сборка, тесты, ветки и выпуск, диагностика, типичные неполадки, памятка разработчику |
+| [AGENTS.md](AGENTS.md) | Карта проекта и подробные договорённости для ИИ-агентов и разработчиков |
 
-Установка выполняется только через собранный Inno Setup EXE-установщик (см. ниже) — отдельного `install.ps1` в репозитории нет, вся логика установки встроена в `installer\FleetManagerAgent.iss`. Конфигурация и логи находятся в `%ProgramData%\FleetManagerAgent`.
+## Быстрый старт
 
-Сервис регистрируется через enrollment-токен и шлёт heartbeat (железо и состав рабочего места: плата, память, диски, видеокарта, мониторы, клавиатура, мышь, USB-устройства + ПО + версия агента + активация Windows и Office) на `/api/agent/heartbeat` сервера Fleet Manager. Активация собирается раз в час: состояние лицензий, последнее обращение к KMS из журнала и доступность порта KMS с ПК.
-
-Обои рабочего стола и экрана блокировки назначает сервер (страница «Обои»): агент получает их в ответе на heartbeat, скачивает и ставит через локальную групповую политику — так же, как их задаёт образ, поэтому обновление политики их не откатывает. Исходные обои образа агент сохраняет и возвращает, когда назначение снято. Открытый рабочий стол обновляет трей, экран блокировки меняется при следующей блокировке.
-
-## Установщик (Inno Setup)
-
-`build-installer.ps1` собирает все три проекта и упаковывает их в единый EXE-установщик:
-
-```powershell
-.\build-installer.ps1
-.\build-installer.ps1 -AppVersion 1.2
-.\build-installer.ps1 -SkipPublish   # пересобрать инсталлятор без dotnet publish
-```
-
-Требует .NET SDK 8+ и Inno Setup 6 (с ISPP). Результат — `dist\FleetManagerAgent-Setup.exe`:
+Токен регистрации выпускает администратор («Администрирование → Агент и токены» в Fleet Manager, `POST /agent/enrollment-tokens`). Установка от администратора:
 
 ```powershell
-FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=your-token
+FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=https://fleet.example /EnrollmentToken='<токен>' /SshLogin='ДОМЕН\имя'
 ```
 
-### Обновление поверх установленного агента
-
-Тот же EXE ставится поверх существующей установки — в этом режиме `ServerUrl` и `EnrollmentToken` не нужны:
+Обновление поверх установленного агента (регистрация сохраняется, `ServerUrl` и токен не нужны):
 
 ```powershell
 FleetManagerAgent-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```
 
-Адрес сервера, идентификатор агента, agent-токен и SSH-ключ переносятся из существующего `%ProgramData%\FleetManagerAgent\agent.json`, поэтому агент остаётся зарегистрированным на том же хосте. Fleet Manager запускает эту же команду удалённо по SSH («Обновить агент» в реестре хостов), а версия из сборки уходит на сервер в heartbeat.
-
-### SSH: порт 22, только для сервера
-
-Ansible управляет хостом по SSH на порту **22**, и хост отвечает только серверу Fleet Manager:
-
-- правило брандмауэра `FleetManager-Agent-SSH` разрешает TCP 22 только с адреса сервера;
-- все остальные разрешающие входящие правила для порта 22 и `sshd.exe` (например, `OpenSSH-Server-In-TCP`, открытое всем) отключаются — иначе ограничение не действует, Windows пропускает соединение по любому подходящему правилу;
-- в `sshd_config` добавляется блок `Match Address *,!<адрес сервера>` с `DenyUsers *` — он ограничивает вход, даже если групповая политика отменяет локальные правила брандмауэра;
-- sshd с портом 5022 (ранние сборки установщика) переводится обратно на 22;
-- PowerShell назначается оболочкой SSH по умолчанию (сервер работает с `ansible_shell_type=powershell`).
-
-Адрес сервера определяется по хосту из `ServerUrl`. Если SSH идёт с другого адреса или нужно разрешить ещё и подсеть администраторов, передайте список IPv4/CIDR — он сохранится в `agent.json` и будет использоваться при обновлениях:
+ПК из образа ([AutoDomain](https://github.com/Xorizo-n/AutoDomain)) ставят до перезагрузки, применяющей новое имя:
 
 ```powershell
-FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=your-token /SshSourceAddress=10.40.240.154,10.40.0.0/24
+FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=https://fleet.example /EnrollmentToken='<токен>' /SshLogin='ДОМЕН\имя' /DeferStart=1 /ResetSshHostKeys=1
 ```
 
-Перезапуск sshd выполняется в конце установки; при удалённом обновлении (установщик запущен внутри SSH-сессии) он откладывается на 2 минуты через одноразовую задачу планировщика, чтобы не оборвать сессию самого обновления.
+Все параметры, шаги установки и удаление — в [installer/USAGE.md](installer/USAGE.md). Файлы устанавливаются в `%ProgramFiles%\FleetManager Agent`, конфигурация, состояние и журналы — в `%ProgramData%\FleetManagerAgent` (папка закрыта для обычных пользователей, в ней токен агента).
 
-### Подготовка ПК из образа (AutoDomain)
+## Сборка и тесты
 
-[AutoDomain](https://github.com/Xorizo-n/AutoDomain) ставит агента сразу после ввода ПК в домен, до перезагрузки, которая применяет новое имя:
-
-```powershell
-FleetManagerAgent-Setup.exe /VERYSILENT /ServerUrl=http://fleet.example.com /EnrollmentToken=your-token /SshLogin=DOMAIN\user /DeferStart=1 /ResetSshHostKeys=1
-```
-
-- `/DeferStart=1` — служба создаётся с отложенным автозапуском, но не запускается, Tray тоже не стартует. Агент регистрируется после перезагрузки, уже под новым именем.
-- `/ResetSshHostKeys=1` — удаляет SSH-ключи хоста, унаследованные от эталонного ПК (если sshd на нём запускался), и sshd создаёт собственные. Внутри SSH-сессии не выполняется.
-- Чистая установка (в `agent.json` нет `AgentToken`) всегда сбрасывает оставшийся `machine-id`: иначе клоны образа делили бы один идентификатор, и сервер считал бы их одним хостом.
-
-Служба и сама не регистрируется, пока переименование ПК ожидает перезагрузки, а пока регистрации нет — повторяет попытку раз в минуту, а не раз в интервал синхронизации.
-
-## Тесты
+Нужны Windows, .NET SDK 8+ и Inno Setup 6 с ISPP.
 
 ```powershell
+.\build-installer.ps1 -AppVersion 1.2   # publish → Inno Setup → dist\FleetManagerAgent-Setup.exe
 dotnet test tests/FleetManager.Agent.Core.Tests/FleetManager.Agent.Core.Tests.csproj
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/install_script.tests.ps1
 ```
+
+Релизы создаёт только CI при слиянии в `main` (версия `<UTC-дата>.<номер запуска>`, например `2026.10.28.28`); сервер сам подтягивает их из GitHub Releases. Подробнее — в [docs/operations.md](docs/operations.md).
+
+## Структура репозитория
+
+```
+src/
+  FleetManager.Agent.Core      общая библиотека: конфигурация, API, инвентаризация, SSH, маршруты, обои…
+  FleetManager.Agent.Service   служба Windows (AgentWorker, ServerRouteKeeper)
+  FleetManager.Agent.Ui        общий WinForms-слой Tray и Control в стиле Windows 11
+  FleetManager.Agent.Tray      значок в трее
+  FleetManager.Agent.Control   панель управления (UAC)
+installer/
+  FleetManagerAgent.iss        Inno Setup: вся логика установки
+  uninstall.ps1                ручное удаление вне пакета
+  USAGE.md                     справочник по установщику
+tests/
+  FleetManager.Agent.Core.Tests  xUnit-тесты Core
+  install_script.tests.ps1       статические проверки установщика
+docs/                          подробная документация
+build-installer.ps1            локальный и CI-конвейер сборки
+.github/workflows/             pr-check и build-installer
+```
+
+## Связанные репозитории
+
+- [FleetManager-Server](https://github.com/Xorizo-n/FleetManager-Server) — backend и frontend; принимает регистрацию, heartbeat и инвентаризацию (`routers/agent.py`), раздаёт установщик и обои.
+- [RTF_OOD_AnsiblePlaybooks](https://github.com/kozlov174/RTF_OOD_AnsiblePlaybooks) — плейбуки, которые сервер запускает на ПК с агентом.
+- [AutoDomain](https://github.com/Xorizo-n/AutoDomain) — подготовка ПК из образа; ставит агента сразу после ввода в домен.

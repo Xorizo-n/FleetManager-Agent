@@ -6,6 +6,8 @@ on:
     paths:
       - "src/**"
       - "installer/**"
+      # Справочник по установщику — документация: правка текста не должна выпускать новую версию агента
+      - "!installer/*.md"
       - "build-installer.ps1"
   workflow_dispatch: {}
 
