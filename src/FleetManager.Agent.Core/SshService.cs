@@ -94,14 +94,30 @@ public static class SshService
 
     private static string? ReadInstallError()
     {
+        string? error = null;
         try
         {
             var log = Path.Combine(AgentConfiguration.DefaultDataDirectory, "logs", "install.log");
-            return File.Exists(log) ? LastInstallError(File.ReadLines(log)) : null;
+            error = File.Exists(log) ? LastInstallError(File.ReadLines(log)) : null;
+            if (error?.Contains("OpenSSH MSI failed with exit code 1603", StringComparison.Ordinal) != true)
+                return error;
+
+            var msiLog = Path.Combine(Path.GetDirectoryName(log)!, "openssh-msi.log");
+            if (!File.Exists(msiLog)) return error;
+            string? firstFailedAction = null;
+            foreach (var line in File.ReadLines(msiLog))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(line,
+                    @"^Action ended [0-9:]+: ([A-Za-z0-9_]{1,64})\. Return value 3\.$");
+                if (!match.Success) continue;
+                firstFailedAction = match.Groups[1].Value;
+                break;
+            }
+            return firstFailedAction is null ? error : $"{error}; first failed MSI action: {firstFailedAction}";
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return null;
+            return error;
         }
     }
 

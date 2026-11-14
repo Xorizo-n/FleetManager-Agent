@@ -63,7 +63,7 @@
 - `disks[]`: `name` (`C:`), `label`, `file_system`, `size_bytes`, `free_bytes`;
 - `components`: `baseboard`, `bios_version`, `memory_modules[]`, `physical_disks[]`, `gpus[]`, `monitors[]`, `input_devices[]`, `usb_devices[]`.
 
-`ssh`: `installed`, `start_type` (`auto`/`manual`/`disabled`/`null`), `listening`, `responding`, `install_error`, `repaired[]`, `firewall_rule` (`ok`/`missing`/`disabled`/`mismatch`/`unknown`), `firewall_ignored_on[]`, `firewall_gpo_allows`, `firewall_blocking[]`, `firewall_error`, `network_profiles[]`, `config_valid`, `config_port`, `source_restricted`, `default_shell_ok`, `path_ok`, `login_is_admin`, `domain_trust` (`ok`/`broken`/`unreachable`/`null`), `host_keys[]`.
+`ssh`: `installed`, `start_type` (`auto`/`manual`/`disabled`/`null`), `listening`, `responding`, `install_error`, `repaired[]`, `firewall_rule` (`ok`/`missing`/`disabled`/`mismatch`/`unknown`), `firewall_ignored_on[]`, `firewall_gpo_allows`, `firewall_blocking[]`, `firewall_error`, `network_profiles[]`, `config_valid`, `config_port`, `source_restricted`, `default_shell_ok`, `path_ok`, `login_is_admin`, `domain_trust` (`ok`/`broken`/`unreachable`/`null`), `host_keys[]`. При ошибке OpenSSH MSI 1603 агент дополняет `install_error` именем первого завершившегося с ошибкой действия, если оно найдено в журнале MSI.
 
 Старые агенты присылают лишь часть полей, поэтому на сервере всё необязательно: отсутствие данных не затирает сохранённое (так, список дисков от старого агента не стирает известный).
 
