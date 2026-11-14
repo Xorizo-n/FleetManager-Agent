@@ -534,8 +534,14 @@ begin
     '            Log ''Installing OpenSSH Server from the bundled MSI (Win32-OpenSSH)...''' + NL +
     '            $msiLog = Join-Path $dataRoot ''logs\openssh-msi.log''' + NL +
     '            $msiArgs = @(''/i'', (''"'' + $openSshMsi + ''"''), ''ADDLOCAL=Server'', ''/qn'', ''/norestart'', ''/l*v'', (''"'' + $msiLog + ''"''))' + NL +
-    '            $msi = Start-Process -FilePath (Join-Path $env:SystemRoot ''System32\msiexec.exe'') -ArgumentList $msiArgs -Wait -PassThru' + NL +
+    '            for ($attempt = 1; $attempt -le 3; $attempt++) {' + NL +
+    '                $msi = Start-Process -FilePath (Join-Path $env:SystemRoot ''System32\msiexec.exe'') -ArgumentList $msiArgs -Wait -PassThru' + NL +
+    '                if ($msi.ExitCode -ne 1618 -or $attempt -eq 3) { break }' + NL +
+    '                Log ''Windows Installer busy (1618); retry in 30 seconds''' + NL +
+    '                Start-Sleep -Seconds 30' + NL +
+    '            }' + NL +
     '            if ($msi.ExitCode -notin 0, 3010) { throw "OpenSSH MSI failed with exit code $($msi.ExitCode), see $msiLog" }' + NL +
+    '            if ($msi.ExitCode -eq 3010) { Log ''OpenSSH MSI requires a reboot (3010)''' + NL +
     '            if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) { throw "OpenSSH MSI finished but there is no sshd service, see $msiLog" }' + NL +
     '            Log ''OpenSSH Server installed from the bundled MSI''' + NL +
     '        }' + NL +
