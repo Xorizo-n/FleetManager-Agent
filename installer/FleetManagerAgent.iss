@@ -565,6 +565,25 @@ begin
     '    for ($i = 0; ($i -lt 20) -and -not (Test-Path $sshdConfig); $i++) { Start-Sleep -Milliseconds 500 }' + NL +
     '    if (-not (Test-Path $sshdConfig)) { throw "sshd_config not found: $sshdConfig" }' + NL +
     '' + NL +
+    '    $sshdExe = Get-SshdExe' + NL +
+    '    if (-not $sshdExe -or -not (Test-Path $sshdExe)) { throw "sshd.exe not found (service path: $sshdExe)" }' + NL +
+    '    $openSshDir = Split-Path -Parent $sshdExe' + NL +
+    '    $sftpExe = Join-Path $openSshDir ''sftp-server.exe''' + NL +
+    '    $hasSftp = Test-Path -LiteralPath $sftpExe -PathType Leaf' + NL +
+    '    if ($hasSftp) {' + NL +
+    '        $envKey = ''HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment''' + NL +
+    '        $machinePath = [string](Get-Item -LiteralPath $envKey).GetValue(''Path'', '''', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)' + NL +
+    '        $existing = $machinePath -split '';'' | Where-Object { [Environment]::ExpandEnvironmentVariables($_.Trim().Trim(''"'')).TrimEnd(''\'') -eq $openSshDir }' + NL +
+    '        if (-not $existing) {' + NL +
+    '            $newPath = ($machinePath.TrimEnd('';'') + '';'' + $openSshDir).TrimStart('';'')' + NL +
+    '            Set-ItemProperty -LiteralPath $envKey -Name Path -Value $newPath -Type ExpandString' + NL +
+    '            $sshdRestartNeeded = $true' + NL +
+    '            Log "Added OpenSSH to the machine PATH: $openSshDir"' + NL +
+    '        }' + NL +
+    '    } else {' + NL +
+    '        Log "WARNING: OpenSSH SFTP executable not found: $sftpExe"' + NL +
+    '    }' + NL +
+    '' + NL +
     '    # PowerShell as the SSH default shell: the server drives hosts with' + NL +
     '    # ansible_shell_type=powershell (raw module); under cmd.exe every command fails.' + NL +
     '    if (-not (Test-Path ''HKLM:\SOFTWARE\OpenSSH'')) { New-Item -Path ''HKLM:\SOFTWARE\OpenSSH'' | Out-Null }' + NL +
@@ -576,6 +595,11 @@ begin
     '    # even where Group Policy overrides the local firewall rules below.' + NL +
     '    $original = [System.IO.File]::ReadAllText($sshdConfig)' + NL +
     '    $lines = @($original -split "`r?`n")' + NL +
+    '    # Win32-OpenSSH can fail to launch a subsystem command with spaces in' + NL +
+    '    # its path. The built-in SFTP subsystem also works with an old service PATH.' + NL +
+    '    if ($hasSftp) {' + NL +
+    '        $lines = @($lines -replace ''^\s*Subsystem\s+sftp\s+sftp-server\.exe\s*(?:#.*)?$'', ''Subsystem sftp internal-sftp'')' + NL +
+    '    }' + NL +
     '    if (@($lines | Where-Object { $_ -match ''^\s*Port\s+\d+\s*$'' -and $_ -notmatch ''^\s*Port\s+22\s*$'' }).Count -gt 0) {' + NL +
     '        $lines = @(''Port 22'') + @($lines | Where-Object { $_ -notmatch ''^\s*Port\s+\d+\s*$'' })' + NL +
     '        Log ''sshd: port moved to 22''' + NL +
@@ -598,8 +622,6 @@ begin
     '        Copy-Item $sshdConfig "$sshdConfig.fleetmanager.bak" -Force' + NL +
     '        [System.IO.File]::WriteAllText($sshdConfig, $updated, $utf8)' + NL +
     '        try {' + NL +
-    '            $sshdExe = Get-SshdExe' + NL +
-    '            if (-not $sshdExe -or -not (Test-Path $sshdExe)) { throw "sshd.exe not found (service path: $sshdExe)" }' + NL +
     '            $ErrorActionPreference = ''Continue''' + NL +
     '            $check = & $sshdExe -t -f $sshdConfig 2>&1 | Out-String' + NL +
     '            $checkCode = $LASTEXITCODE' + NL +

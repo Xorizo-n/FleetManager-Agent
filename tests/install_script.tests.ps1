@@ -84,6 +84,20 @@ if (-not $sshBlock.Contains('-t -f $sshdConfig') -or -not $sshBlock.Contains('Wr
 if (-not $sshBlock.Contains('DefaultShell') -or -not $sshBlock.Contains('WindowsPowerShell\v1.0\powershell.exe')) {
     throw 'Installer must make PowerShell the OpenSSH default shell: the server uses ansible_shell_type=powershell.'
 }
+if (-not $sshBlock.Contains('$openSshDir = Split-Path -Parent $sshdExe') -or
+    -not $sshBlock.Contains('DoNotExpandEnvironmentNames') -or
+    -not $sshBlock.Contains('-Name Path -Value $newPath -Type ExpandString')) {
+    throw 'Installer must add the active OpenSSH directory to the machine PATH without expanding existing entries.'
+}
+$sftpRewrite = @($lines | Where-Object { $_ -match '^\s*\$lines = .*Subsystem sftp internal-sftp' })
+if ($sftpRewrite.Count -ne 1) { throw 'Installer must switch the stock SFTP subsystem to internal-sftp.' }
+& {
+    $lines = @('Subsystem sftp sftp-server.exe', 'Subsystem sftp sftp-server.exe -l INFO')
+    . ([scriptblock]::Create($sftpRewrite[0]))
+    if ($lines[0] -cne 'Subsystem sftp internal-sftp' -or $lines[1] -cne 'Subsystem sftp sftp-server.exe -l INFO') {
+        throw 'Installer must rewrite only the stock SFTP subsystem and preserve custom commands.'
+    }
+}
 if ($sshBlock.Contains('Get-WindowsCapability') -or -not $sshBlock.Contains('if (-not (Get-Service sshd')) {
     throw 'OpenSSH capability must be installed only when no sshd service exists (old hosts run the MSI build).'
 }
