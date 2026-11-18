@@ -130,16 +130,28 @@ end;
 
 // Write a self-contained PowerShell script to a temp file and execute it.
 // Using -File avoids the quoting and length limits of -Command "...".
-procedure RunPowerShellScript(const Script: string);
+function RunPowerShellScript(const Script: string): Boolean;
 var
   TempFile: string;
   ResultCode: Integer;
 begin
   TempFile := ExpandConstant('{tmp}') + '\fm-agent-step.ps1';
-  SaveStringToFile(TempFile, Script, False);
-  Exec(ExpandConstant('{sys}') + '\WindowsPowerShell\v1.0\powershell.exe',
+  Result := False;
+  if not SaveStringToFile(TempFile, Script, False) then
+  begin
+    Log('Could not write the temporary PowerShell script.');
+    Exit;
+  end;
+  if Exec(ExpandConstant('{sys}') + '\WindowsPowerShell\v1.0\powershell.exe',
     '-NonInteractive -ExecutionPolicy Bypass -File "' + TempFile + '"',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Result := ResultCode = 0;
+    if not Result then
+      Log('PowerShell script exited with code ' + IntToStr(ResultCode));
+  end
+  else
+    Log('Could not start PowerShell, system error ' + IntToStr(ResultCode));
   DeleteFile(TempFile);
 end;
 
@@ -541,7 +553,7 @@ begin
     '                Start-Sleep -Seconds 30' + NL +
     '            }' + NL +
     '            if ($msi.ExitCode -notin 0, 3010) { throw "OpenSSH MSI failed with exit code $($msi.ExitCode), see $msiLog" }' + NL +
-    '            if ($msi.ExitCode -eq 3010) { Log ''OpenSSH MSI requires a reboot (3010)''' + NL +
+    '            if ($msi.ExitCode -eq 3010) { Log ''OpenSSH MSI requires a reboot (3010)'' }' + NL +
     '            if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) { throw "OpenSSH MSI finished but there is no sshd service, see $msiLog" }' + NL +
     '            Log ''OpenSSH Server installed from the bundled MSI''' + NL +
     '        }' + NL +
@@ -922,7 +934,8 @@ begin
     '' + NL +
     'Log ''=== Install script completed ==''' + NL;
 
-  RunPowerShellScript(Script);
+  if not RunPowerShellScript(Script) then
+    RaiseException('FleetManager Agent configuration failed. See the setup and install logs.');
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

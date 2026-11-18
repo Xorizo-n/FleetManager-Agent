@@ -9,6 +9,25 @@ $uninstaller = Get-Content (Join-Path $PSScriptRoot '..\installer\uninstall.ps1'
 $worker = Get-Content (Join-Path $PSScriptRoot '..\src\FleetManager.Agent.Service\AgentWorker.cs') -Raw
 $apiClient = Get-Content (Join-Path $PSScriptRoot '..\src\FleetManager.Agent.Core\FleetManagerApiClient.cs') -Raw
 
+# Inno compiles the string literals but does not parse the PowerShell they generate.
+$block = [regex]::Match($iss, '(?ms)^  Script :=\r?\n(?<body>.*?)[ ]\+ NL;')
+if (-not $block.Success) { throw 'Could not find the generated post-install script.' }
+$lines = foreach ($line in ($block.Groups['body'].Value -split '\r?\n')) {
+    if ($line -notmatch "^\s*'") { continue }
+    $parts = [regex]::Matches($line, "'(?:''|[^'])*'|PsLiteral\(\w+\)|PsBool\(\w+\)|DataRoot|InstallRoot|ServiceExe|TrayExe")
+    ($parts | ForEach-Object {
+        $part = $_.Value
+        if ($part.StartsWith("'")) { $part.Substring(1, $part.Length - 2).Replace("''", "'") }
+        elseif ($part.StartsWith('PsBool')) { '$false' }
+        elseif ($part.StartsWith('PsLiteral')) { "'example'" }
+        else { 'C:\example' }
+    }) -join ''
+}
+$tokens = $null
+$parseErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseInput(($lines -join "`n"), [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors) { throw "Generated post-install script has syntax errors: $($parseErrors -join '; ')" }
+
 if ($iss -notmatch '\(GEnrollmentToken = ''''\) and \(not GUpgrade\)[\s\S]{0,300}Result := False') {
     throw 'Installer must require EnrollmentToken for a first-time install.'
 }
